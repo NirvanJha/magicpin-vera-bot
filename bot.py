@@ -651,7 +651,7 @@ async def metadata():
         "team_members": ["Nirvan Jha"],
         "model": "vera-engagement-hybrid-v1",
         "approach": "context-guided dynamic composer with Cialdini compulsion levers and zero-hallucination guardrails",
-        "contact_email": "nirvan@magicpin.ai",
+        "contact_email": "nirvan.jha.ug23@nsut.ac.in",
         "version": "1.0.0",
         "submitted_at": "2026-04-26T08:00:00Z"
     }
