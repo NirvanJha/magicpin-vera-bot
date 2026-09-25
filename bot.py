@@ -648,10 +648,10 @@ async def metadata():
     """Returns bot identity, model details, and approach description."""
     return {
         "team_name": "magicpin-ai-mastery",
-        "team_members": ["Divyansh Ahuja"],
+        "team_members": ["Nirvan Jha"],
         "model": "vera-engagement-hybrid-v1",
         "approach": "context-guided dynamic composer with Cialdini compulsion levers and zero-hallucination guardrails",
-        "contact_email": "divyansh@magicpin.ai",
+        "contact_email": "nirvan@magicpin.ai",
         "version": "1.0.0",
         "submitted_at": "2026-04-26T08:00:00Z"
     }
