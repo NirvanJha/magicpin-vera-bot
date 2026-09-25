@@ -685,6 +685,9 @@ async def push_context(body: ContextPushRequest, response: Response):
     Ingests category, merchant, customer, or trigger context.
     Idempotent by (scope, context_id, version).
     """
+    key = (body.scope, body.context_id)
+    cur = contexts.get(key)
+    
     # Handle versioning according to spec:
     # 1. Higher version replaces older version -> accepted: True
     # 2. Identical version is idempotent no-op -> accepted: True
