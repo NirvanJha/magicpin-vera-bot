@@ -23,6 +23,8 @@ jobs:
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8080/v1/healthz && break; sleep 1; done
       - name: Judge lifecycle test (48 checks)
         run: python tests/e2e_judge_test.py http://127.0.0.1:8080
+      - name: Replay-scenario smoke test
+        run: python tests/test_bot.py
       - name: Restart-resilience test
         run: python tests/restart_test.py
       - name: Submission regenerates cleanly
