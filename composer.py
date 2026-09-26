@@ -9,6 +9,7 @@ made-up default.
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, List, Optional, Tuple
@@ -27,12 +28,25 @@ def _l(x: Any) -> list:
 
 
 def _num(x: Any) -> Optional[float]:
+    """Numbers from context, or None for anything a merchant couldn't plausibly verify (NaN, inf, 1e308, bools)."""
     try:
         if isinstance(x, bool):
             return None
-        return float(x)
-    except (TypeError, ValueError):
+        v = float(x)
+    except (TypeError, ValueError, OverflowError):
         return None
+    return v if math.isfinite(v) and abs(v) < 1e10 else None
+
+
+def _txt(x: Any, limit: int = 60) -> str:
+    """Display-safe short string: names/localities longer than `limit` are cut at a word boundary."""
+    if not isinstance(x, str):
+        return ""
+    x = " ".join(x.split())
+    if len(x) <= limit:
+        return x
+    cut = x[:limit].rsplit(" ", 1)[0]
+    return cut if len(cut) >= limit // 2 else x[:limit]
 
 
 def parse_dt(s: Any) -> Optional[datetime]:
@@ -105,24 +119,46 @@ def join(*parts: Optional[str]) -> str:
 # CONTEXT WRAPPER
 # =============================================================================
 
+def _clean(obj: Any, depth: int = 0) -> Any:
+    """Absurd / non-finite numbers become None everywhere, so they can never be rendered."""
+    if depth > 30:
+        return None
+    if isinstance(obj, float) and not (math.isfinite(obj) and abs(obj) < 1e10):
+        return None
+    if isinstance(obj, int) and not isinstance(obj, bool) and abs(obj) >= 10 ** 10:
+        return None
+    if isinstance(obj, dict):
+        return {k: _clean(v, depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean(v, depth + 1) for v in obj]
+    return obj
+
+
+def _strs(items: Any) -> List[str]:
+    """Only plain text / integer items from a list — never str() of a dict or list."""
+    return [str(x) for x in _l(items) if isinstance(x, str) or (isinstance(x, int) and not isinstance(x, bool))]
+
+
 class Ctx:
     def __init__(self, category: dict, merchant: dict, trigger: dict,
                  customer: Optional[dict], now: Optional[datetime],
                  exclude_items: Iterable[str] = ()):
-        self.category = _d(category)
-        self.merchant = _d(merchant)
-        self.trigger = _d(trigger)
-        self.customer = _d(customer) if customer else None
+        self.category = _clean(_d(category))
+        self.merchant = _clean(_d(merchant))
+        self.trigger = _clean(_d(trigger))
+        self.customer = _clean(_d(customer)) if customer else None
         self.payload = _d(self.trigger.get("payload"))
         self.now = now
         self.exclude_items = set(exclude_items or ())
 
-        self.cat = self.category.get("slug") or self.merchant.get("category_slug") or ""
+        slug = self.category.get("slug")
+        self.cat = slug if isinstance(slug, str) else (self.merchant.get("category_slug")
+                                                       if isinstance(self.merchant.get("category_slug"), str) else "")
         ident = _d(self.merchant.get("identity"))
-        self.m_name = ident.get("name") or ""
-        self.owner = (ident.get("owner_first_name") or "").strip()
-        self.locality = ident.get("locality") or ""
-        self.city = ident.get("city") or ""
+        self.m_name = _txt(ident.get("name"), 60)
+        self.owner = _txt(ident.get("owner_first_name"), 30)
+        self.locality = _txt(ident.get("locality"), 40)
+        self.city = _txt(ident.get("city"), 30)
         self.m_langs = [str(x).lower() for x in _l(ident.get("languages"))]
         self.perf = _d(self.merchant.get("performance"))
         self.signals = [str(s) for s in _l(self.merchant.get("signals"))]
@@ -225,7 +261,7 @@ class Ctx:
         return f"Your CTR is {ctr:.1%} vs {avg:.1%} peer average."
 
     def peer_scope(self) -> str:
-        return re.sub(r"_?\d{4}$", "", str(self.peer.get("scope") or "")).replace("_", " ").strip()
+        return re.sub(r"_?\d{4}$", "", _txt(self.peer.get("scope"), 60)).replace("_", " ").strip()
 
     def peer_views_line(self) -> str:
         """Social proof from category peer_stats — only when both numbers exist and differ meaningfully."""
@@ -261,7 +297,7 @@ class Ctx:
 
     def c_names(self) -> Tuple[str, str]:
         """(who we address, who the service is for) - handles 'Karthik (parent: Sumitra)'."""
-        name = (self.c_ident().get("name") or "").strip()
+        name = _txt(self.c_ident().get("name"), 60)
         m = re.match(r"^(.+?)\s*\(parent:\s*(.+?)\)$", name)
         return (m.group(2), m.group(1)) if m else (name, "")
 
@@ -447,7 +483,8 @@ def m_renewal(c: Ctx) -> dict:
     days = c.payload.get("days_remaining", sub.get("days_remaining"))
     plan = c.payload.get("plan") or sub.get("plan") or ""
     amt = fmt_int(c.payload.get("renewal_amount"))
-    label = "trial" if str(plan).lower() == "trial" else f"{plan + ' ' if plan else ''}plan"
+    plan = _txt(plan, 30)
+    label = "trial" if plan.lower() == "trial" else f"{plan + ' ' if plan else ''}plan"
     dn = _num(days)
     if dn is None:
         head = f"{c.sal()}, your {label} is due for renewal"
@@ -559,7 +596,11 @@ def m_review_theme(c: Ctx) -> dict:
         pos = sorted((_d(r) for r in _l(c.merchant.get("review_themes"))),
                      key=lambda r: -(_num(r.get("occurrences_30d")) or 0))
         if not pos or not pos[0].get("theme"):
-            return m_generic(c)
+            body = join(f"{c.sal()}, a new pattern is showing up in {c.m_name or 'your'}'s recent reviews.", c.perf_line(),
+                        "Spotting a theme early is the cheapest way to protect your rating.",
+                        c.ask("the 30-day review summary with exact quotes + reply drafts"))
+            return _res(body, "binary", "review_theme_emerged trigger without theme data: flag it truthfully, offer the summary.",
+                        params=[c.sal(), c.m_name])
         r = pos[0]
         body = join(f"{c.sal()}, your reviews keep praising {human(r.get('theme'))}"
                     + (f" — {r.get('occurrences_30d')} mentions in 30 days." if r.get("occurrences_30d") else "."),
@@ -603,9 +644,9 @@ def m_planning(c: Ctx) -> dict:
             break
     if base and c.cat == "restaurants":
         o, p = base
-        lines = [f"- 10+ orders: ₹{round(p * 0.95)} each (5% off your '{o}')",
-                 f"- 25+ orders: ₹{round(p * 0.90)} each (10% off)",
-                 f"- 50+ orders: ₹{round(p * 0.85)} each (15% off) + free delivery"]
+        lines = [f"- 10+ orders: suggested ₹{round(p * 0.95)} each (5% off your '{o}')",
+                 f"- 25+ orders: suggested ₹{round(p * 0.90)} each (10% off)",
+                 f"- 50+ orders: suggested ₹{round(p * 0.85)} each (15% off) + free delivery"]
     else:
         lines = ["- Who: age band / segment it's for",
                  "- Format: sessions per week, batch size, duration",
@@ -655,7 +696,7 @@ def m_dormant(c: Ctx) -> dict:
 
 def m_supply(c: Ctx) -> dict:
     mol = c.payload.get("molecule")
-    batches = [str(b) for b in _l(c.payload.get("affected_batches"))]
+    batches = _strs(c.payload.get("affected_batches"))
     mfr = c.payload.get("manufacturer")
     item = c.digest(c.payload.get("alert_id"), ("alert", "supply"))
     src = f" ({item.get('source')})" if item and item.get("source") else ""
@@ -678,7 +719,7 @@ def m_supply(c: Ctx) -> dict:
 
 def m_cat_seasonal(c: Ctx) -> dict:
     trends = []
-    for t in _l(c.payload.get("trends"))[:4]:
+    for t in _strs(c.payload.get("trends"))[:4]:
         m = re.match(r"(.+?)_demand_([+-]?\d+)", str(t))
         trends.append(f"{m.group(1).replace('_', ' ')} {int(m.group(2)):+d}%" if m else human(t))
     season = human(c.payload.get("season"))
@@ -782,13 +823,20 @@ def c_trial(c: Ctx) -> dict:
     tdt = parse_dt(c.payload.get("trial_date"))
     slots = c.slot_labels("next_session_options")
     _, child = c.c_names()
-    who = f"bringing {child} for the" if child else "coming in for your"
     trial = c.noun("trial")
-    s1 = f"Thanks for {who} {trial}" + (f" on {fmt_date(tdt)}." if tdt else ".")
-    s2 = f"Next session: {' or '.join(slots)}." if slots else ""
     offers = c.active_offers()
-    s3 = f"If you continue: {offers[0]}." if offers else ""
-    cta = _two_slot_cta(slots) or ("Reply YES to book it." if slots else "Reply YES and we'll set up the next one.")
+    if c.c_hi():
+        who = f"{child} ko {trial} ke liye laane" if child else f"{trial} ke liye aane"
+        s1 = f"{who[0].upper() + who[1:]} ka shukriya" + (f" ({fmt_date(tdt)})." if tdt else ".")
+        s2 = f"Agla session: {' ya '.join(slots)}." if slots else ""
+        s3 = f"Continue karne par: {offers[0]}." if offers else ""
+        cta = _two_slot_cta(slots) or "Reply YES, hum agla session set kar denge."
+    else:
+        who = f"bringing {child} for the" if child else "coming in for your"
+        s1 = f"Thanks for {who} {trial}" + (f" on {fmt_date(tdt)}." if tdt else ".")
+        s2 = f"Next session: {' or '.join(slots)}." if slots else ""
+        s3 = f"If you continue: {offers[0]}." if offers else ""
+        cta = _two_slot_cta(slots) or ("Reply YES to book it." if slots else "Reply YES and we'll set up the next one.")
     body = join(f"{c.c_greet()}, {c.from_line()}", s1, s2, s3, cta)
     return _cust(body, "binary", "Trial follow-up with the real next-session slot.", c)
 
@@ -809,7 +857,7 @@ def c_wedding(c: Ctx) -> dict:
 
 
 def c_refill(c: Ctx) -> dict:
-    meds = [str(m) for m in _l(c.payload.get("molecule_list") or c.payload.get("medicines"))]
+    meds = _strs(c.payload.get("molecule_list") or c.payload.get("medicines"))
     if not meds and c.cat != "pharmacies":
         return c_recall(c)  # a refill trigger on a non-pharmacy with no molecules: treat as a visit reminder
     out = parse_dt(c.payload.get("stock_runs_out_iso") or c.payload.get("due_date"))
@@ -884,6 +932,14 @@ def _strip_taboo(body: str, category: dict) -> str:
     return " ".join(kept) if kept else body
 
 
+_LEAK = re.compile(r"\b(None|nan|NaN|inf|True|False|undefined|null)\b|[{}\[\]]|\d(\.\d+)?e[+-]\d{2,}")
+
+
+def valid_body(body: Any) -> bool:
+    """Post-composition validator: non-empty text with no Python/JSON artefacts from corrupted context."""
+    return isinstance(body, str) and bool(body.strip()) and not _LEAK.search(body) and len(body) <= 1500
+
+
 def compose(category: dict, merchant: dict, trigger: dict, customer: Optional[dict] = None,
             now: Optional[datetime] = None, exclude_items: Iterable[str] = ()) -> dict:
     """
@@ -898,13 +954,23 @@ def compose(category: dict, merchant: dict, trigger: dict, customer: Optional[di
         fn = CUSTOMER_KINDS.get(kind, c_generic)
     else:
         fn = MERCHANT_KINDS.get(kind, m_generic)
+    fallback = c_generic if is_customer else m_generic
     try:
         out = fn(c)
     except Exception:  # never let one odd payload kill a tick
-        out = c_generic(c) if is_customer else m_generic(c)
+        out = fallback(c)
+    if not valid_body(out.get("body")):  # corrupted context leaked into the text: degrade to the safe composer
+        try:
+            out = fallback(c)
+        except Exception:
+            out = {"body": "", "cta": "none", "send_as": "vera", "rationale": "", "template_params": []}
+    out["valid"] = valid_body(out.get("body"))
 
     if "\n" not in out["body"]:
         out["body"] = _strip_taboo(out["body"], c.category)
+    anchors = [a for a in out.get("template_params", []) if a][:3]
+    if anchors:
+        out["rationale"] = f"{out['rationale']} Anchored on: {'; '.join(anchors)}."
     out["suppression_key"] = c.trigger.get("suppression_key") or f"{kind}:{c.merchant.get('merchant_id', '')}"
     out["kind"] = kind
     out["digest_item_id"] = c.used_item

@@ -12,6 +12,7 @@ Run:  uvicorn bot:app --host 0.0.0.0 --port 8080
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -28,7 +29,9 @@ from composer import compose, parse_dt  # noqa: F401  (compose re-exported)
 from conversation_handlers import ConversationState, respond
 
 
-app = FastAPI(title="magicpin Vera Bot", version="2.0.0")
+app = FastAPI(title="magicpin Vera Bot", version="2.1.0")
+log = logging.getLogger("vera")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 START_TIME = time.time()
 
 VALID_SCOPES = ("category", "merchant", "customer", "trigger")
@@ -201,28 +204,51 @@ load_state()
 # LOOKUPS
 # =============================================================================
 
+_index: Dict[str, Any] = {"n": -1, "seed_n": -1, "ids": {}, "norm": {}}
+
+
+def _norm_trg(tid: str) -> str:
+    return re.sub(r"^trg_\d+_", "trg_", tid)
+
+
+def _ids() -> Tuple[Dict[str, List[List[str]]], Dict[str, List[List[str]]]]:
+    """Per-scope id lists and normalized-trigger map, rebuilt only when the stores change size."""
+    if _index["n"] != len(contexts) or _index["seed_n"] != len(seed):
+        ids: Dict[str, List[List[str]]] = {s: [[], []] for s in VALID_SCOPES}
+        norm: Dict[str, List[List[str]]] = {}
+        for i, store in enumerate((contexts, seed)):
+            for (scope, cid) in list(store):
+                if scope in ids:
+                    ids[scope][i].append(cid)
+                if scope == "trigger":
+                    norm.setdefault(_norm_trg(cid), [[], []])[i].append(cid)
+        _index.update(n=len(contexts), seed_n=len(seed), ids=ids, norm=norm)
+    return _index["ids"], _index["norm"]
+
+
 def get_ctx(scope: str, cid: Optional[str]) -> Tuple[Optional[str], Optional[dict]]:
     """Exact id first (pushed, then seed); then a UNIQUE '<id>_' prefix match."""
-    if not cid:
+    if not cid or not isinstance(cid, str):
         return None, None
     for store in (contexts, seed):
         if (scope, cid) in store:
             return cid, store[(scope, cid)]["payload"]
-    for store in (contexts, seed):
-        hits = [k[1] for k in store if k[0] == scope and (k[1].startswith(cid + "_") or cid.startswith(k[1] + "_"))]
+    ids, _ = _ids()
+    for i, store in enumerate((contexts, seed)):
+        hits = [x for x in ids.get(scope, [[], []])[i] if x.startswith(cid + "_") or cid.startswith(x + "_")]
         if len(hits) == 1:
             return hits[0], store[(scope, hits[0])]["payload"]
     return cid, None
 
 
 def resolve_trigger(raw: str) -> Tuple[Optional[str], Optional[dict]]:
-    tid, trg = get_ctx("trigger", raw)
-    if trg:
-        return tid, trg
-    # 'trg_research_digest_dentists' == 'trg_001_research_digest_dentists' (exact after stripping the number)
-    norm = re.sub(r"^trg_\d+_", "trg_", raw)
     for store in (contexts, seed):
-        hits = [k[1] for k in store if k[0] == "trigger" and re.sub(r"^trg_\d+_", "trg_", k[1]) == norm]
+        if ("trigger", raw) in store:
+            return raw, store[("trigger", raw)]["payload"]
+    # 'trg_research_digest_dentists' == 'trg_001_research_digest_dentists' (exact after stripping the number)
+    _, norm = _ids()
+    for i, store in enumerate((contexts, seed)):
+        hits = norm.get(_norm_trg(raw), [[], []])[i]
         if len(hits) == 1:
             return hits[0], store[("trigger", hits[0])]["payload"]
     return None, None
@@ -236,18 +262,37 @@ def iso(dt: datetime) -> str:
     return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+_INVISIBLE = re.compile("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def sanitize(obj: Any, depth: int = 0) -> Any:
+    """Strip control / bidi-override characters from every string; drop pathological nesting."""
+    if depth > 40:
+        return None
+    if isinstance(obj, str):
+        return _INVISIBLE.sub("", obj)
+    if isinstance(obj, dict):
+        return {sanitize(k, depth + 1) if isinstance(k, str) else k: sanitize(v, depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize(v, depth + 1) for v in obj]
+    return obj
+
+
 async def read_json(request: Request) -> Tuple[Optional[dict], Optional[str]]:
     """Parse the body as JSON regardless of Content-Type (curl -d sends form-encoded)."""
     raw = await request.body()
     if len(raw) > MAX_CONTEXT_BYTES:
         return None, "payload_too_large"
     try:
-        data = json.loads(raw.decode("utf-8-sig") or "{}")
-    except (ValueError, UnicodeDecodeError) as e:
-        return None, f"malformed_json: {e}"
+        # NaN / Infinity literals become null; deeply nested bodies raise RecursionError -> malformed
+        data = json.loads(raw.decode("utf-8-sig") or "{}", parse_constant=lambda _c: None)
+    except (ValueError, UnicodeDecodeError, RecursionError) as e:
+        return None, f"malformed_json: {type(e).__name__}"
+    except Exception as e:  # never let parsing take the endpoint down
+        return None, f"malformed_json: {type(e).__name__}"
     if not isinstance(data, dict):
         return None, "body must be a JSON object"
-    return data, None
+    return sanitize(data), None
 
 
 def bad_request(reason: str, details: str = "", code: int = 400) -> JSONResponse:
@@ -283,7 +328,7 @@ async def metadata():
         "approach": "trigger-kind dispatch over 4 context layers; every fact sourced from pushed context; "
                     "suppression + per-merchant dedup on tick; intent-classified multi-turn replies",
         "contact_email": "nirvan.jha.ug23@nsut.ac.in",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "submitted_at": "2026-04-26T08:00:00Z",
     }
 
@@ -319,6 +364,26 @@ async def push_context(request: Request):
     return {"accepted": True, "ack_id": f"ack_{cid}_v{version}", "stored_at": stored_at}
 
 
+@app.post("/v1/teardown")
+@app.post("/teardown")
+async def teardown():
+    """End of test (testing brief §11): wipe every context, conversation and the on-disk snapshot."""
+    with _state_lock:
+        for store in (contexts, conversations, sent_digest, opted_out, recipient_hold, merchant_auto_counts):
+            store.clear()
+        sent_suppression.clear()
+        sent_bodies.clear()
+        counters.update(conv=0, last_tick_now=None)
+        _dirty.clear()
+        if STATE_FILE:
+            for f in (Path(STATE_FILE), Path(STATE_FILE).with_suffix(".tmp")):
+                try:
+                    f.unlink()
+                except FileNotFoundError:
+                    pass
+    return {"status": "ok", "wiped": True}
+
+
 @app.post("/v1/tick")
 @app.post("/tick")
 async def tick(request: Request):
@@ -330,7 +395,50 @@ async def tick(request: Request):
         mark_dirty()
         return {"actions": actions}
     except Exception as e:  # never 500 on the judge
+        log.exception("tick failed")
         return {"actions": [], "error": f"internal: {type(e).__name__}"}
+
+
+def _candidate(order: int, raw: Any, now: datetime, seen: Set[str]) -> Optional[tuple]:
+    """Resolve one available trigger into a send candidate, or None with the reason logged at debug."""
+    if not isinstance(raw, str):
+        return None
+    tid, trg = resolve_trigger(raw)
+    if not isinstance(trg, dict) or tid in seen:
+        return None
+    seen.add(tid)
+    # No expires_at filtering: available_triggers is the judge's own list of what's active
+    # right now, and its simulated clock may not line up with the dataset's dates.
+    mid, merchant = get_ctx("merchant", trg.get("merchant_id"))
+    if not isinstance(merchant, dict):
+        return None
+    if mid in opted_out and opted_out[mid] > now:
+        return None
+    payload = trg.get("payload") if isinstance(trg.get("payload"), dict) else {}
+    _, category = get_ctx("category", merchant.get("category_slug")) if isinstance(merchant.get("category_slug"), str) \
+        else (None, None)
+    if not isinstance(category, dict):
+        _, category = get_ctx("category", payload.get("category"))
+    if not isinstance(category, dict):
+        return None
+    cust_id, customer = get_ctx("customer", trg.get("customer_id"))
+    customer = customer if isinstance(customer, dict) else None
+    if trg.get("scope") == "customer" and not customer:
+        return None  # can't address a customer we know nothing about
+    if customer:
+        prefs = customer.get("preferences") if isinstance(customer.get("preferences"), dict) else {}
+        consent = customer.get("consent") if isinstance(customer.get("consent"), dict) else {}
+        if prefs.get("reminder_opt_in") is False or consent.get("scope") == []:
+            return None  # customer explicitly opted out of messages
+    recipient = cust_id if customer else mid
+    if recipient in recipient_hold and recipient_hold[recipient] > now:
+        return None  # honour our own earlier wait / decline / live-thread decision
+    skey = trg.get("suppression_key") if isinstance(trg.get("suppression_key"), str) and trg.get("suppression_key") \
+        else f"{trg.get('kind')}:{tid}"
+    if (recipient, skey) in sent_suppression:
+        return None
+    urgency = trg.get("urgency") if isinstance(trg.get("urgency"), (int, float)) and not isinstance(trg.get("urgency"), bool) else 0
+    return (-urgency, order, tid, trg, mid, merchant, category, cust_id if customer else None, customer, recipient, skey)
 
 
 def _run_tick(data: dict) -> List[dict]:
@@ -343,40 +451,13 @@ def _run_tick(data: dict) -> List[dict]:
     candidates = []
     seen: Set[str] = set()
     for order, raw in enumerate(raw_ids):
-        if not isinstance(raw, str):
+        try:
+            cand = _candidate(order, raw, now, seen)
+        except Exception:  # one corrupt trigger must never cost the rest of the tick
+            log.exception("tick: skipping trigger %r", raw)
             continue
-        tid, trg = resolve_trigger(raw)
-        if not trg or tid in seen:
-            continue
-        seen.add(tid)
-
-        # No expires_at filtering: available_triggers is the judge's own list of what's active
-        # right now, and its simulated clock may not line up with the dataset's dates.
-        mid, merchant = get_ctx("merchant", trg.get("merchant_id"))
-        if not merchant:
-            continue
-        if mid in opted_out and opted_out[mid] > now:
-            continue
-        slug = merchant.get("category_slug") or (trg.get("payload") or {}).get("category")
-        _, category = get_ctx("category", slug)
-        if not category:
-            continue
-        cust_id, customer = get_ctx("customer", trg.get("customer_id"))
-        if trg.get("scope") == "customer" and not customer:
-            continue  # can't address a customer we know nothing about
-        if customer:
-            prefs, consent = customer.get("preferences") or {}, customer.get("consent") or {}
-            if prefs.get("reminder_opt_in") is False or consent.get("scope") == []:
-                continue  # customer explicitly opted out of messages
-        recipient = cust_id if customer else mid
-        if recipient in recipient_hold and recipient_hold[recipient] > now:
-            continue  # honour our own earlier wait / decline / live-thread decision
-        skey = trg.get("suppression_key") or f"{trg.get('kind')}:{tid}"
-        if (recipient, skey) in sent_suppression:
-            continue
-        urgency = trg.get("urgency") if isinstance(trg.get("urgency"), (int, float)) else 0
-        candidates.append((-urgency, order, tid, trg, mid, merchant, category, cust_id if customer else None,
-                           customer, recipient, skey))
+        if cand:
+            candidates.append(cand)
 
     candidates.sort(key=lambda x: (x[0], x[1]))
     actions: List[dict] = []
@@ -386,8 +467,15 @@ def _run_tick(data: dict) -> List[dict]:
             break
         if recipient in used_recipients:
             continue  # one message per recipient per tick; the rest wait for the next tick
-        out = compose(category, merchant, trg, customer, now=now, exclude_items=sent_digest.get(mid, set()))
+        try:
+            out = compose(category, merchant, trg, customer, now=now, exclude_items=sent_digest.get(mid, set()))
+        except Exception:
+            log.exception("tick: compose failed for %s", tid)
+            continue
         body = out["body"]
+        if not out.get("valid", True):
+            log.warning("tick: dropped %s — body failed output validation", tid)
+            continue
         if not body or body in sent_bodies:
             continue
 
@@ -414,7 +502,7 @@ def _run_tick(data: dict) -> List[dict]:
             "template_params": out.get("template_params") or [],
             "body": body,
             "cta": out["cta"],
-            "suppression_key": out["suppression_key"],
+            "suppression_key": skey,
             "rationale": out["rationale"],
         })
     return actions
@@ -434,18 +522,27 @@ async def handle_reply(request: Request):
     try:
         return _run_reply(data, conv_id, message)
     except Exception as e:
+        log.exception("reply failed for %s", conv_id)
         return {"action": "wait", "wait_seconds": 1800, "rationale": f"internal fallback ({type(e).__name__})"}
 
 
+def _as_int(x: Any, default: int = 0) -> int:
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return default
+
+
 def _run_reply(data: dict, conv_id: str, message: str) -> dict:
-    from_role = data.get("from_role") or "merchant"
+    from_role = data.get("from_role") if data.get("from_role") in ("merchant", "customer") else "merchant"
+    data["turn_number"] = _as_int(data.get("turn_number"))
     state = conversations.get(conv_id)
     if state is None:
         state = ConversationState(conversation_id=conv_id, merchant_id=data.get("merchant_id"),
                                   customer_id=data.get("customer_id"))
         conversations[conv_id] = state
-    state.merchant_id = state.merchant_id or data.get("merchant_id")
-    state.customer_id = state.customer_id or data.get("customer_id")
+    state.merchant_id = state.merchant_id or (data.get("merchant_id") if isinstance(data.get("merchant_id"), str) else None)
+    state.customer_id = state.customer_id or (data.get("customer_id") if isinstance(data.get("customer_id"), str) else None)
 
     mid, merchant = get_ctx("merchant", state.merchant_id)
     slug = (merchant or {}).get("category_slug")

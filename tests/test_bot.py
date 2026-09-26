@@ -10,11 +10,12 @@ Tests:
 """
 
 import json
+import sys
 import urllib.request
 import urllib.error
 from datetime import datetime
 
-BASE_URL = "http://127.0.0.1:8080"
+BASE_URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8080"
 
 def request(method, path, data=None):
     url = f"{BASE_URL}{path}"

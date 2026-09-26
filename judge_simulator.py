@@ -36,7 +36,7 @@ LLM_MODEL = ""  # <-- Optional: specify model or leave empty for default
 OLLAMA_URL = "http://localhost:11434"
 
 # Which test to run by default
-TEST_SCENARIO = "full_evaluation"
+TEST_SCENARIO = "all"
 
 # =============================================================================
 # ██████  END OF CONFIGURATION - DON'T EDIT BELOW THIS LINE ██████
@@ -102,16 +102,14 @@ def print_score_bar(dimension: str, score: int, max_score: int = 10):
     bar_filled = int((score / max_score) * 20)
     bar_empty = 20 - bar_filled
     color = Colors.GREEN if score >= 7 else Colors.YELLOW if score >= 4 else Colors.RED
-    print(f"  {dimension:22} [{color}{'#' * bar_filled}{Colors.DIM}{'-' * bar_empty}{Colors.RESET}] {color}{score:2}/{max_score}{Colors.RESET}")
+    print(f"  {dimension:22} [{color}{'█' * bar_filled}{Colors.DIM}{'░' * bar_empty}{Colors.RESET}] {color}{score:2}/{max_score}{Colors.RESET}")
 
 def print_reason(text: str):
     wrapped = text[:200] + "..." if len(text) > 200 else text
-    safe_text = wrapped.encode("ascii", "replace").decode("ascii")
-    print(f"    {Colors.DIM}{safe_text}{Colors.RESET}")
+    print(f"    {Colors.DIM}{wrapped}{Colors.RESET}")
 
 def print_hint(hint: str):
-    safe_hint = hint.encode("ascii", "replace").decode("ascii")
-    print(f"\n  {Colors.YELLOW}Hint:{Colors.RESET} {safe_hint}")
+    print(f"\n  {Colors.YELLOW}Hint:{Colors.RESET} {hint}")
 
 # =============================================================================
 # DATA CLASSES
@@ -327,51 +325,6 @@ class OpenRouterProvider(LLMProvider):
         return data["choices"][0]["message"]["content"]
 
 
-class LocalBenchmarkProvider(LLMProvider):
-    def name(self) -> str:
-        return "Local Benchmark Evaluator"
-
-    def complete(self, prompt: str, system: str = None) -> str:
-        # Extract message body from prompt
-        body_match = re.search(r'Body \(\d+ chars\): "([^"]+)"', prompt)
-        body = body_match.group(1) if body_match else prompt
-        
-        # Check specific facts (numbers, dates, currency, citations)
-        nums = len(re.findall(r'\b\d+(?:,\d+)*(?:\.\d+)?%?', body))
-        currency = len(re.findall(r'₹\s*\d+', body))
-        sources = any(k in body for k in ["JIDA", "CDSCO", "trial", "abstract", "Notice", "batch"])
-        specificity = min(10, 4 + min(4, nums) + (2 if sources or currency else 0))
-        
-        # Category fit
-        taboos = ["guaranteed", "100% safe", "completely cure", "miracle", "best in city"]
-        has_taboo = any(t in body.lower() for t in taboos)
-        category_fit = 4 if has_taboo else (9 if any(k in body for k in ["Dr.", "teeth", "clinic", "covers", "thali", "medicines", "HIIT", "salon"]) else 8)
-        
-        # Merchant fit
-        merchant_fit = 9 if any(w in body for w in ["Lajpat", "Indiranagar", "Malviya", "Alambagh", "Gomti", "Suresh", "Meera", "Ramesh", "Karthik", "views"]) else 8
-        
-        # Trigger relevance / decision quality
-        decision_quality = 9 if any(w in body for w in ["recall", "update", "week", "due", "competitor", "IPL", "thali", "camp", "drop", "surge", "batch"]) else 8
-        
-        # Engagement compulsion
-        has_cta = any(w in body.lower() for w in ["reply", "want me to", "chalega", "confirm", "yes", "review"])
-        engagement = 9 if has_cta else 7
-        
-        return json.dumps({
-            "specificity": specificity,
-            "specificity_reason": f"Verifiable metrics found: {nums} numbers, {currency} pricing points, verified source citations.",
-            "category_fit": category_fit,
-            "category_fit_reason": "Tone aligns with vertical register, taboos strictly omitted.",
-            "merchant_fit": merchant_fit,
-            "merchant_fit_reason": "Personalized to merchant owner and locality.",
-            "decision_quality": decision_quality,
-            "decision_quality_reason": "Explicitly connects to the trigger event.",
-            "engagement_compulsion": engagement,
-            "engagement_reason": "Clear call-to-action with low-friction ask.",
-            "hint": "Message scores high across all 5 dimensions."
-        })
-
-
 def create_provider() -> LLMProvider:
     """Create LLM provider from configuration."""
     providers = {
@@ -382,7 +335,6 @@ def create_provider() -> LLMProvider:
         "groq": lambda: GroqProvider(LLM_API_KEY, LLM_MODEL),
         "ollama": lambda: OllamaProvider(LLM_MODEL, OLLAMA_URL),
         "openrouter": lambda: OpenRouterProvider(LLM_API_KEY, LLM_MODEL),
-        "local": lambda: LocalBenchmarkProvider(),
     }
 
     if LLM_PROVIDER not in providers:
@@ -391,7 +343,6 @@ def create_provider() -> LLMProvider:
         sys.exit(1)
 
     return providers[LLM_PROVIDER]()
-
 
 # =============================================================================
 # DATASET & BOT CLIENT
@@ -410,7 +361,7 @@ class DatasetLoader:
             cat_dir = self.dataset_dir / "categories"
             if cat_dir.exists():
                 for f in cat_dir.glob("*.json"):
-                    data = json.load(open(f, encoding="utf-8"))
+                    data = json.load(open(f))
                     self.categories[data.get("slug", f.stem)] = data
 
             for name, container, key in [
@@ -420,7 +371,7 @@ class DatasetLoader:
             ]:
                 path = self.dataset_dir / name
                 if path.exists():
-                    data = json.load(open(path, encoding="utf-8"))
+                    data = json.load(open(path))
                     items = data.get(container, data.get(container.rstrip("s"), []))
                     storage = getattr(self, container)
                     for item in items:
@@ -893,7 +844,7 @@ class JudgeSimulator:
         score = self.scorer.score(action, category, merchant, trigger, customer)
         self.all_scores.append(score)
 
-        body = action.get("body", "")[:50].encode("ascii", "replace").decode("ascii")
+        body = action.get("body", "")[:50]
         print(f"\n{Colors.CYAN}Message:{Colors.RESET} \"{body}...\"")
 
         print_score_bar("Specificity", score.specificity)
@@ -969,14 +920,14 @@ class JudgeSimulator:
 # =============================================================================
 
 def main():
-    global LLM_PROVIDER
     print_header("magicpin AI Challenge — LLM Judge")
 
     # Validate configuration
-    if LLM_PROVIDER != "ollama" and LLM_PROVIDER != "local" and not LLM_API_KEY:
-        print_warn("LLM_API_KEY is not set — falling back to built-in Local Benchmark Evaluator")
-        LLM_PROVIDER = "local"
-
+    if LLM_PROVIDER != "ollama" and not LLM_API_KEY:
+        print_fail("LLM_API_KEY is not set!")
+        print_info("Edit the CONFIGURATION section at the top of this file")
+        print_info("Set your API key for your chosen provider")
+        sys.exit(1)
 
     # Create LLM provider
     try:

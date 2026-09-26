@@ -89,6 +89,12 @@ try:
     check("suppression survives (T1 not re-sent)", a == [], a)
     a = call("POST", "/v1/tick", {"now": "2026-04-26T10:35:00Z", "available_triggers": [T2]})["actions"]
     check("after the 30-min wait expires, T2 is sent", len(a) == 1, a)
+    time.sleep(2.5)
+    check("state file exists before teardown", STATE.is_file())
+    r = call("POST", "/v1/teardown", {})
+    h = call("GET", "/v1/healthz")["contexts_loaded"]
+    check("teardown wipes memory (brief §11)", r.get("wiped") is True and sum(h.values()) == 0, (r, h))
+    check("teardown deletes the on-disk snapshot (no context persists after the test)", not STATE.exists())
 finally:
     p.kill()
     p.wait()

@@ -6,9 +6,9 @@ on:
   pull_request:
 
 jobs:
-  judge-lifecycle:
+  test-suite:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -17,28 +17,14 @@ jobs:
       - run: pip install -r requirements.txt pyflakes
       - name: Lint
         run: python -m pyflakes bot.py composer.py conversation_handlers.py tests/
-      - name: Start bot
-        run: |
-          uvicorn bot:app --port 8080 > bot.log 2>&1 &
-          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8080/v1/healthz && break; sleep 1; done
-      - name: Judge lifecycle test (48 checks)
-        run: python tests/e2e_judge_test.py http://127.0.0.1:8080
-      - name: Replay-scenario smoke test
-        run: python tests/test_bot.py
-      - name: Restart-resilience test
-        run: python tests/restart_test.py
-      - name: Submission regenerates cleanly
-        run: |
-          python generate_submission.py
-          test "$(wc -l < submission.jsonl)" -eq 30
-          ! grep -q 'â‚¹' submission.jsonl
-      - name: Bot log on failure
-        if: failure()
-        run: cat bot.log
+      # spec (§7 + submission regeneration), intents, conversation quality, e2e judge lifecycle,
+      # 10-seed simulated-judge soak, 3-seed fuzz, replay smoke test, restart + teardown
+      - name: All suites
+        run: python tests/run_all.py
 
   docker:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -50,8 +36,13 @@ jobs:
         run: |
           docker run -d --name vera -p 8080:8080 vera-bot
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8080/v1/healthz && break; sleep 1; done
-      - name: Judge lifecycle test against the container
+      - name: Judge lifecycle against the container
         run: python tests/e2e_judge_test.py http://127.0.0.1:8080
+      - name: Soak + fuzz against the container
+        run: |
+          curl -sf -X POST http://127.0.0.1:8080/v1/teardown
+          python tests/soak_test.py http://127.0.0.1:8080 11
+          python tests/fuzz_test.py http://127.0.0.1:8080 2000 7
       - name: Container healthcheck reports healthy
         run: |
           for i in $(seq 1 20); do s=$(docker inspect -f '{{.State.Health.Status}}' vera); echo "$s"; [ "$s" = healthy ] && exit 0; sleep 3; done; exit 1

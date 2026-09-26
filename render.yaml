@@ -9,11 +9,6 @@ services:
     region: singapore
     numInstances: 1
     healthCheckPath: /v1/healthz
-    autoDeploy: false            # never redeploy mid-test: a restart is the one thing that can hurt you
-    envVars:
-      - key: VERA_STATE_FILE
-        value: /data/vera_state.json
-    disk:
-      name: vera-data
-      mountPath: /data
-      sizeGB: 1
+    autoDeploy: false            # never redeploy mid-test: a restart wipes in-memory context
+    # State is in-memory. For restart resilience add a disk at /data and VERA_STATE_FILE=/data/vera_state.json
+    # (POST /v1/teardown wipes it at the end of the test).

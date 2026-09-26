@@ -1,6 +1,5 @@
-# Fly.io — always-on single machine in Mumbai with a persistent volume.
+# Fly.io — one always-on machine in Mumbai.
 #   fly launch --no-deploy --copy-config   (pick a unique app name)
-#   fly volumes create vera_data --region bom --size 1
 #   fly deploy
 app = "magicpin-vera-bot"
 primary_region = "bom"
@@ -10,11 +9,8 @@ primary_region = "bom"
 
 [env]
   PORT = "8080"
-  VERA_STATE_FILE = "/data/vera_state.json"
-
-[[mounts]]
-  source = "vera_data"
-  destination = "/data"
+  # Opt-in restart resilience: add a [[mounts]] volume at /data and set
+  # VERA_STATE_FILE = "/data/vera_state.json"   (POST /v1/teardown wipes it)
 
 [http_service]
   internal_port = 8080
