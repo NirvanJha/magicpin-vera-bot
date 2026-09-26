@@ -224,11 +224,30 @@ class Ctx:
             return ""
         return f"Your CTR is {ctr:.1%} vs {avg:.1%} peer average."
 
+    def peer_scope(self) -> str:
+        return re.sub(r"_?\d{4}$", "", str(self.peer.get("scope") or "")).replace("_", " ").strip()
+
+    def peer_views_line(self) -> str:
+        """Social proof from category peer_stats — only when both numbers exist and differ meaningfully."""
+        views, avg = _num(self.perf.get("views")), _num(self.peer.get("avg_views_30d"))
+        if views is None or not avg:
+            return ""
+        who = f"{self.peer_scope()} average" if self.peer_scope() else "Peers average"
+        who = who[0].upper() + who[1:]
+        if views < avg * 0.9:
+            return f"{who} {int(avg):,} views a month — you're at {int(views):,}."
+        if views > avg * 1.1:
+            return f"You're ahead of the {int(avg):,}-view monthly average for {self.peer_scope() or 'your peers'}."
+        return ""
+
+    def peer_line(self) -> str:
+        return self.peer_ctr_line() or self.peer_views_line()
+
     def ask(self, noun: str) -> str:
         """Single binary CTA, always the last sentence."""
         noun = noun.strip()
         if self.hi:
-            noun = re.sub(r"^(the|a|an)\s+", "", noun)
+            noun = re.sub(r"^(the|a|an)\s+", "", noun).replace("+ a ", "+ ")
             return f"Main {noun} bhej doon? Reply YES."
         return f"Want me to send {noun}? Reply YES."
 
@@ -384,7 +403,7 @@ def m_perf_dip(c: Ctx) -> dict:
     offers = c.active_offers()
     lever = f"Re-pushing '{offers[0]}' in a fresh post is the fastest lever." if offers else (
         f"You have no active offer — '{c.catalog_offer()}' is the most common one in your category." if c.catalog_offer() else "")
-    body = join(head, c.perf_line(), c.peer_ctr_line(), stale_s, lever, c.ask("2 ready-to-publish Google posts"))
+    body = join(head, c.perf_line(), c.peer_line(), stale_s, lever, c.ask("2 ready-to-publish Google posts"))
     return _res(body, "binary", f"Performance dip on {metric} ({p}%) anchored on merchant numbers + peer benchmark.",
                 params=[c.sal(), f"{p}%"])
 
@@ -419,7 +438,7 @@ def m_perf_spike(c: Ctx) -> dict:
     offers = c.active_offers()
     lever = f"A follow-up post pinning '{offers[0]}' converts the extra traffic while it lasts." if offers else \
         "A follow-up post now converts the extra traffic while it lasts."
-    body = join(head, c.perf_line(), lever, c.ask("a follow-up post draft"))
+    body = join(head, c.perf_line(), c.peer_views_line(), lever, c.ask("a follow-up post draft"))
     return _res(body, "binary", f"Performance spike ({p}%) — momentum + effort externalization.", params=[c.sal(), f"{p}%"])
 
 
@@ -676,14 +695,14 @@ def m_gbp(c: Ctx) -> dict:
     head = f"{c.sal()}, {c.m_name or 'your listing'} is still unverified on Google."
     upl = f"Verified listings see about {up}% more views and calls." if up else ""
     how = f"Verification is via {path}." if path else ""
-    body = join(head, upl, how, c.perf_line(), c.ask("step-by-step verification help"))
+    body = join(head, upl, how, c.perf_line(), c.peer_views_line(), c.ask("step-by-step verification help"))
     return _res(body, "binary", "Unverified GBP with uplift estimate from trigger.", params=[c.sal(), f"{up}%"])
 
 
 def m_generic(c: Ctx) -> dict:
     offers = c.active_offers()
     offer_s = f"Your '{offers[0]}' is live — a fresh post keeps it visible." if offers else ""
-    body = join(f"{c.sal()}, quick update on {c.m_name or 'your listing'}{c.where()}.", c.perf_line(), c.peer_ctr_line(),
+    body = join(f"{c.sal()}, quick update on {c.m_name or 'your listing'}{c.where()}.", c.perf_line(), c.peer_line(),
                 offer_s, c.ask("a ready-to-publish post"))
     return _res(body, "binary", "Fallback: merchant numbers + peer benchmark.", params=[c.sal(), c.m_name])
 

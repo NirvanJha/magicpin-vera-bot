@@ -172,6 +172,17 @@ def core_fact(c: Optional[Ctx]) -> str:
     return f"Your live offer is '{offers[0]}'." if offers else ""
 
 
+def alt_fact(c: Optional[Ctx], avoid: str) -> str:
+    """A second, different grounded fact — used so follow-up answers never repeat verbatim."""
+    if not c:
+        return ""
+    for cand in (c.perf_line(), c.peer_line(),
+                 f"Your live offer is '{c.active_offers()[0]}'." if c.active_offers() else ""):
+        if cand and cand != avoid:
+            return cand
+    return ""
+
+
 def action_body(c: Optional[Ctx], hi: bool, from_role: str) -> str:
     """What Vera actually delivers after a yes. Never asks another qualifying question."""
     if c is None:
@@ -283,7 +294,16 @@ def respond(
         if (merchant_context or trigger_context) else None
     owner = c.owner if c else ""
 
+    prior = {str(t.get("msg", "")) for t in history if t.get("from") == "vera"}
+
     def send(body: str, cta: str, why: str) -> dict:
+        if body in prior:  # anti-repetition: never send the same text twice in a conversation
+            fact = core_fact(c)
+            alt = alt_fact(c, fact)
+            body = (f"To add one more data point: {alt} Reply YES and I'll take it from here." if alt else
+                    "Happy to go deeper on any part. Reply YES and I'll prepare it — nothing goes live without your OK.")
+            if body in prior:
+                body = "I'm ready whenever you are — one YES and I'll share the draft here."
         return {"action": "send", "body": body, "cta": cta, "rationale": why}
 
     if not msg:

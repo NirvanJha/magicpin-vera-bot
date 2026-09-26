@@ -1,7 +1,7 @@
 """End-to-end judge-lifecycle test (warmup, 12 ticks, injection, replay, load).
 
 Run against a FRESH local bot only - it pushes test data, opt-outs and suppressions:
-    uvicorn bot:app --port 8080 && python e2e_judge_test.py http://127.0.0.1:8080
+    uvicorn bot:app --port 8080 && python tests/e2e_judge_test.py http://127.0.0.1:8080
 """
 import glob
 import json
@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8080"
-DS = Path(__file__).parent / "dataset"
+DS = Path(__file__).resolve().parent.parent / "dataset"
 results = []
 
 

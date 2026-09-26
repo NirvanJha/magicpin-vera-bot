@@ -1,0 +1,16 @@
+# Best-effort keep-warm for free hosting tiers that sleep when idle.
+# GitHub may delay scheduled runs; an always-on paid instance is the real fix.
+# Set the repo variable BOT_URL (Settings -> Secrets and variables -> Variables) to your deployment URL.
+name: keepalive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - run: curl -fsS --max-time 90 "${{ vars.BOT_URL || 'https://magicpin-vera-bot-vtz2.onrender.com' }}/v1/healthz"

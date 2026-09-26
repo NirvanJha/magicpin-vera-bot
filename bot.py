@@ -14,9 +14,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from itertools import count
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -45,8 +46,114 @@ sent_suppression: Set[Tuple[str, str]] = set()     # (recipient_id, suppression_
 sent_bodies: Set[str] = set()                      # anti-repetition
 sent_digest: Dict[str, Set[str]] = {}              # merchant_id -> digest item ids already used
 opted_out: Dict[str, datetime] = {}                # merchant_id -> suppressed until
+recipient_hold: Dict[str, datetime] = {}           # recipient -> no new outbound until (our own wait/end decisions)
 merchant_auto_counts: Dict[str, int] = {}
-_conv_counter = count(1)
+counters: Dict[str, Any] = {"conv": 0, "last_tick_now": None}
+
+ACTIVE_THREAD_HOLD = timedelta(minutes=5)    # no second thread to the same person within one tick window
+DECLINE_HOLD = timedelta(hours=6)
+AUTO_REPLY_HOLD = timedelta(hours=24)
+
+
+# =============================================================================
+# STATE PERSISTENCE (optional: set VERA_STATE_FILE)
+# A restart mid-test would otherwise wipe every context the judge pushed.
+# =============================================================================
+
+STATE_FILE = os.environ.get("VERA_STATE_FILE", "").strip()
+_state_lock = threading.Lock()
+_dirty = threading.Event()
+
+
+def mark_dirty() -> None:
+    if STATE_FILE:
+        _dirty.set()
+
+
+def _snapshot() -> dict:
+    def dt(d: Dict[str, datetime]) -> Dict[str, str]:
+        return {k: v.isoformat() for k, v in d.items()}
+    return {
+        "contexts": [[k[0], k[1], v] for k, v in contexts.items()],
+        "conversations": {k: asdict(v) for k, v in conversations.items()},
+        "sent_suppression": [list(x) for x in sent_suppression],
+        "sent_bodies": list(sent_bodies),
+        "sent_digest": {k: list(v) for k, v in sent_digest.items()},
+        "opted_out": dt(opted_out),
+        "recipient_hold": dt(recipient_hold),
+        "merchant_auto_counts": merchant_auto_counts,
+        "counters": {"conv": counters["conv"],
+                     "last_tick_now": counters["last_tick_now"].isoformat() if counters["last_tick_now"] else None},
+    }
+
+
+def save_state() -> None:
+    if not STATE_FILE:
+        return
+    with _state_lock:
+        for _ in range(5):  # handlers may mutate state mid-copy; retry instead of locking the hot path
+            try:
+                data = json.dumps(_snapshot(), ensure_ascii=False)
+                break
+            except RuntimeError:
+                time.sleep(0.05)
+        else:
+            _dirty.set()
+            return
+    path = Path(STATE_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(data, encoding="utf-8")
+    os.replace(tmp, path)  # atomic
+
+
+def load_state() -> None:
+    if not STATE_FILE or not Path(STATE_FILE).is_file():
+        return
+    try:
+        d = json.loads(Path(STATE_FILE).read_text(encoding="utf-8"))
+        for scope, cid, v in d.get("contexts", []):
+            contexts[(scope, cid)] = v
+        for k, v in d.get("conversations", {}).items():
+            conversations[k] = ConversationState(**v)
+        sent_suppression.update(tuple(x) for x in d.get("sent_suppression", []))
+        sent_bodies.update(d.get("sent_bodies", []))
+        for k, v in d.get("sent_digest", {}).items():
+            sent_digest[k] = set(v)
+        for src, dst in (("opted_out", opted_out), ("recipient_hold", recipient_hold)):
+            for k, v in d.get(src, {}).items():
+                dst[k] = datetime.fromisoformat(v)
+        merchant_auto_counts.update(d.get("merchant_auto_counts", {}))
+        c = d.get("counters", {})
+        counters["conv"] = c.get("conv", 0)
+        counters["last_tick_now"] = datetime.fromisoformat(c["last_tick_now"]) if c.get("last_tick_now") else None
+    except Exception as e:  # a corrupt snapshot must never stop the bot from booting
+        print(f"[vera] could not restore state: {e}")
+
+
+def _saver_loop() -> None:
+    while True:
+        _dirty.wait()
+        time.sleep(1.0)  # coalesce bursts of writes
+        _dirty.clear()
+        try:
+            save_state()
+        except Exception as e:
+            print(f"[vera] state save failed: {e}")
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    if STATE_FILE:
+        threading.Thread(target=_saver_loop, daemon=True, name="vera-state-saver").start()
+
+
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    try:
+        save_state()
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -87,6 +194,7 @@ def load_seed() -> None:
 
 
 load_seed()
+load_state()
 
 
 # =============================================================================
@@ -207,6 +315,7 @@ async def push_context(request: Request):
 
     stored_at = iso(now_utc())
     contexts[key] = {"version": version, "payload": payload, "stored_at": stored_at}
+    mark_dirty()
     return {"accepted": True, "ack_id": f"ack_{cid}_v{version}", "stored_at": stored_at}
 
 
@@ -217,13 +326,16 @@ async def tick(request: Request):
     if err:
         return JSONResponse({"actions": [], "error": err}, status_code=400)
     try:
-        return {"actions": _run_tick(data)}
+        actions = _run_tick(data)
+        mark_dirty()
+        return {"actions": actions}
     except Exception as e:  # never 500 on the judge
         return {"actions": [], "error": f"internal: {type(e).__name__}"}
 
 
 def _run_tick(data: dict) -> List[dict]:
     now = parse_dt(data.get("now")) or now_utc()
+    counters["last_tick_now"] = now
     raw_ids = data.get("available_triggers") or []
     if not isinstance(raw_ids, list):
         return []
@@ -252,7 +364,13 @@ def _run_tick(data: dict) -> List[dict]:
         cust_id, customer = get_ctx("customer", trg.get("customer_id"))
         if trg.get("scope") == "customer" and not customer:
             continue  # can't address a customer we know nothing about
+        if customer:
+            prefs, consent = customer.get("preferences") or {}, customer.get("consent") or {}
+            if prefs.get("reminder_opt_in") is False or consent.get("scope") == []:
+                continue  # customer explicitly opted out of messages
         recipient = cust_id if customer else mid
+        if recipient in recipient_hold and recipient_hold[recipient] > now:
+            continue  # honour our own earlier wait / decline / live-thread decision
         skey = trg.get("suppression_key") or f"{trg.get('kind')}:{tid}"
         if (recipient, skey) in sent_suppression:
             continue
@@ -273,7 +391,8 @@ def _run_tick(data: dict) -> List[dict]:
         if not body or body in sent_bodies:
             continue
 
-        conv_id = f"conv_{recipient}_{trg.get('kind', 'msg')}_{next(_conv_counter)}"
+        counters["conv"] += 1
+        conv_id = f"conv_{recipient}_{trg.get('kind', 'msg')}_{counters['conv']}"
         state = ConversationState(conversation_id=conv_id, merchant_id=mid, customer_id=cust_id,
                                   trigger_id=tid, trigger_kind=trg.get("kind"))
         state.turns.append({"from": "vera", "msg": body, "turn": 1})
@@ -336,15 +455,27 @@ def _run_reply(data: dict, conv_id: str, message: str) -> dict:
 
     state.turns.append({"from": from_role, "msg": message, "turn": data.get("turn_number")})
     now = parse_dt(data.get("received_at")) or now_utc()
+    sim_now = counters["last_tick_now"] or now  # judge's simulated clock, as seen on /v1/tick
 
     result = respond(state, message, merchant_context=merchant, category_context=category,
                      trigger_context=trigger, customer_context=customer, from_role=from_role,
                      merchant_auto_count=merchant_auto_counts.get(mid or "", 0), now=now)
 
+    recipient = (state.customer_id if from_role == "customer" else mid) or mid
     if mid:
         merchant_auto_counts[mid] = state.auto_reply_count
         if state.closed_reason == "opt_out" and result["action"] == "end" and from_role == "merchant":
-            opted_out[mid] = now + timedelta(days=OPT_OUT_DAYS)
+            opted_out[mid] = sim_now + timedelta(days=OPT_OUT_DAYS)
+    if recipient:
+        if result["action"] == "wait":
+            hold = sim_now + timedelta(seconds=int(result.get("wait_seconds") or 0))
+        elif result["action"] == "end":
+            hold = sim_now + {"auto_reply": AUTO_REPLY_HOLD, "declined": DECLINE_HOLD}.get(state.closed_reason or "",
+                                                                                         timedelta(0))
+        else:
+            hold = sim_now + ACTIVE_THREAD_HOLD
+        recipient_hold[recipient] = max(hold, recipient_hold.get(recipient, hold))
+    mark_dirty()
 
     if result["action"] == "send":
         state.turns.append({"from": "vera", "msg": result.get("body", ""), "turn": (data.get("turn_number") or 0) + 1})

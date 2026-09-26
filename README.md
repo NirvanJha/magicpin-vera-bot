@@ -1,114 +1,124 @@
-# magicpin AI Challenge — Vera Merchant Assistant Submission
+# Vera — merchant engagement bot (magicpin AI Challenge)
 
-## 1. Overview & Architecture
+[![CI](https://github.com/NirvanJha/magicpin-vera-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/NirvanJha/magicpin-vera-bot/actions/workflows/ci.yml)
 
-This submission implements **Vera 2.0**, an AI engagement assistant for magicpin's network of local merchants across 5 core verticals (dentists, salons, gyms, restaurants, pharmacies) and their customers.
+An HTTP bot that plays **Vera**, magicpin's WhatsApp assistant for local merchants (dentists, salons, gyms, restaurants, pharmacies) and their customers. The judge harness pushes context, wakes the bot on a clock and role-plays merchant replies. The bot decides who to message, what to say and how to carry the conversation.
 
-The system is built on a **4-Context Composition Architecture**:
-$$\text{compose}(\text{CategoryContext}, \text{MerchantContext}, \text{TriggerContext}, \text{CustomerContext?}) \to \text{ComposedMessage}$$
-
-### Core Modules
-* **`bot.py`**:
-  * `compose(...)`: High-specificity, zero-hallucination engagement composer adhering to vertical tones and Cialdini compulsion levers.
-  * **HTTP Server (FastAPI)**: Exposes the 5 required endpoints (`POST /v1/context`, `POST /v1/tick`, `POST /v1/reply`, `GET /v1/healthz`, `GET /v1/metadata`).
-* **`conversation_handlers.py`**: Multi-turn state machine managing auto-reply loop breaking, intent transitions, delay requests, and hostile opt-outs.
-* **`submission.jsonl`**: Composed outputs for all 30 canonical evaluation pairs (`T01`–`T30`).
+**Live:** `https://magicpin-vera-bot-vtz2.onrender.com` · endpoints under `/v1/*`
 
 ---
 
-## 2. Problem & Solution Summary
+## Design principles
 
-### PROBLEM
-magicpin needs an AI merchant assistant on WhatsApp that generates contextual, relevant, and compelling conversations without suffering from auto-reply loops, intent-handoff regressions, generic discount pitches, or low engagement frequency.
+1. **Every fact must come from pushed context.** Names, numbers, prices, dates and sources in a message are read from the category, merchant, trigger or customer context. If a value is missing, the sentence that needed it is dropped. There are no hardcoded fallbacks such as fake competitor names or made-up patient counts.
+2. **Respect the recipient.** One message per recipient per tick. A `suppression_key` is never sent twice. The bot follows its own `wait` and `end` decisions on later ticks. An explicit STOP silences a merchant for 30 days.
+3. **Act on a yes.** When a merchant commits ("ok let's do it", "haan", "go ahead"), the next message delivers the draft or checklist, not another qualifying question.
+4. **Never be the reason a run fails.** The endpoints never return 500. Bodies parse with or without a JSON `Content-Type`. Ticks take milliseconds. State can survive a restart.
 
-### OUR SOLUTION
-Our system:
-1. Receives structured context via `POST /v1/context`
-2. Stores context state with strict version control (idempotent, 409 stale-version handling)
-3. Interprets incoming triggers during periodic `POST /v1/tick`
-4. Identifies the most relevant merchant/category signals
-5. Applies category-specific communication rules and taboos
-6. Generates high-specificity, zero-hallucination messages
-7. Validates response schemas and single binary/open-ended CTAs
-8. Applies suppression and state rules
-9. Returns standard API actions (`send`, `wait`, `end`)
-10. Handles subsequent multi-turn replies (`POST /v1/reply`) seamlessly
+## Architecture
 
-### Concrete Example (Dentist Vertical):
-* **INPUT**:
-  * Category: `dentists` (clinical peer tone, peer avg CTR: 3.0%)
-  * Merchant: `m_001_drmeera_dentist_delhi` (Dr. Meera's Dental Clinic, Lajpat Nagar, CTR: 2.1%)
-  * Trigger: `trg_001_research_digest_fluoride` (JIDA Oct issue: 3-mo fluoride recall cuts caries 38% better)
-* **DECISION**: Select the research item because it directly anchors on Dr. Meera's high-risk adult cohort with verifiable clinical evidence.
-* **OUTPUT MESSAGE**:
-  > *"Dr. Meera, JIDA's Oct issue landed. One item relevant to your high-risk adult patients — 2,100-patient trial showed 3-month fluoride recall cuts caries recurrence 38% better than 6-month. I drafted a 2-minute WhatsApp recall template for your 78 lapsed patients. Want me to send the preview over?"*
-* **EVALUATION BREAKDOWN**:
-  * **Specificity**: Cites "JIDA Oct issue", "2,100-patient trial", "38% better", "78 lapsed patients".
-  * **Category Fit**: Peer clinical tone for dental practice, avoiding retail discount hype.
-  * **Merchant Fit**: Personalized to Dr. Meera in Lajpat Nagar.
-  * **Trigger Relevance**: Directly communicates the newly released research digest.
-  * **Engagement**: Reciprocity + effort externalization with a clear binary preview CTA.
-
----
-
-## 3. Solutions to Production Vera's Key Failure Modes
-
-| Production Failure Mode | Our Implementation & Solution |
-| :--- | :--- |
-| **1. Auto-Reply Pollution** (40–70% canned replies burning turns) | Rapid heuristic and regex matching on WhatsApp Business automated messages + repetition frequency tracking across turns. Immediately triggers `action: "end"` with polite rationale to conserve budget. |
-| **2. Intent-Handoff Regressions** (Vera requalifying after merchant says yes) | Explicit intent classifier detecting commitment signals (*"Ok let's do it"*, *"I want to join"*). Switches immediately to execution mode (`action: "send"`) with concrete drafts and action verbs (*Done*, *Proceeding*, *Draft*), completely omitting qualification queries. |
-| **3. Generic Discount Pitches** (*"Flat 20% off"* / *"Increase sales"*) | Strict extraction of canonical service + price offerings (*"Dental Cleaning @ ₹299"*, *"Haircut @ ₹99"*), verified performance numbers (views, calls, CTR), and cited scientific sources (*JIDA Oct 2026, p.14*). |
-| **4. Low Engagement Cadence** (Over-reliance on repetitive profile reminders) | Diversified outreach portfolio leveraging curiosity, social proof benchmarks, research digests, local weather (42°C heatwaves), and events (IPL matches) with contrarian recommendations. |
-
----
-
-## 4. API Endpoints Documentation
-
-The service exposes exactly 5 required endpoints under a single public base URL:
-
-### 1. `POST /v1/context`
-* **Purpose**: Ingest context payloads (`category`, `merchant`, `customer`, `trigger`).
-* **Request**: `{"scope": "category", "context_id": "dentists", "version": 1, "payload": {...}}`
-* **Response (200)**: `{"accepted": true, "ack_id": "ack_dentists_v1", "stored_at": "..."}`
-* **Conflict (409)**: `{"accepted": false, "reason": "stale_version", "current_version": 2}`
-
-### 2. `POST /v1/tick`
-* **Purpose**: Periodic wake-up to inspect context and generate proactive outreach actions.
-* **Request**: `{"now": "2026-04-26T10:30:00Z", "available_triggers": ["trg_001"]}`
-* **Response (200)**: `{"actions": [{"conversation_id": "conv_1", "send_as": "vera", "body": "...", "cta": "open_ended", "suppression_key": "...", "rationale": "..."}]}`
-
-### 3. `POST /v1/reply`
-* **Purpose**: Synchronously handle merchant/customer responses in multi-turn conversations.
-* **Request**: `{"conversation_id": "conv_1", "merchant_id": "m_001", "from_role": "merchant", "message": "Ok lets do it", "turn_number": 2}`
-* **Response (200)**: `{"action": "send", "body": "Done! Proceeding...", "cta": "binary", "rationale": "..."}`
-
-### 4. `GET /v1/healthz`
-* **Purpose**: Lightweight liveness probe (independent of external LLM APIs).
-* **Response (200)**: `{"status": "ok", "uptime_seconds": 120, "contexts_loaded": {...}}`
-
-### 5. `GET /v1/metadata`
-* **Purpose**: Returns bot team and architecture metadata.
-* **Response (200)**: `{"team_name": "magicpin-ai-mastery", "model": "vera-engagement-hybrid-v1", "version": "1.0.0"}`
-
----
-
-## 5. Running & Deploying
-
-### Running Locally
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Start Uvicorn dev server
-uvicorn bot:app --host 0.0.0.0 --port 8080
-
-# 3. Test API suite & Swagger UI
-python test_bot.py
-# Open Swagger UI at http://localhost:8080/docs
+```mermaid
+flowchart LR
+    J[Judge harness] -- POST /v1/context --> S[(Context store<br/>versioned, idempotent)]
+    J -- POST /v1/tick --> T[Tick planner]
+    T --> S
+    T --> C[composer.py<br/>trigger-kind dispatch]
+    C --> T
+    T -- actions --> J
+    J -- POST /v1/reply --> R[conversation_handlers.py<br/>intent classifier]
+    R --> S
+    R -- send / wait / end --> J
+    S -. snapshot .-> D[(VERA_STATE_FILE)]
 ```
 
-### Render Web Service Deployment
-* **Build Command**: `pip install -r requirements.txt`
-* **Start Command**: `uvicorn bot:app --host 0.0.0.0 --port $PORT`
-* **Deployment Note**: Connect your GitHub repository to your Render Web Service dashboard to obtain your live public service URL.
+| File | Responsibility |
+|---|---|
+| [`bot.py`](bot.py) | FastAPI app with the 5 endpoints: the versioned context store, the tick planner (suppression, per-recipient dedup, holds, opt-outs, urgency ordering), and optional state persistence |
+| [`composer.py`](composer.py) | `compose(category, merchant, trigger, customer)`: all 26 trigger kinds in the dataset (plus aliases) mapped to merchant-facing or customer-facing composers, with a category-aware voice, Hinglish when the recipient speaks Hindi, and taboo filtering |
+| [`conversation_handlers.py`](conversation_handlers.py) | Classifies each reply in priority order: auto-reply → opt-out → abuse → off-topic → busy/later → decline → commitment → question. Every answer is grounded in the conversation's trigger |
 
+### Tick planner
+
+For each trigger the judge lists as active, the planner:
+- resolves the trigger, merchant, category and customer (exact id first, then a unique prefix match);
+- skips it if the merchant opted out, the customer explicitly declined messages, the `suppression_key` was already used for this recipient, or the recipient is on hold;
+- orders the rest by `urgency`, sends at most one message per recipient, and stops at 20 actions.
+
+### Reply handling
+
+| Merchant says | Bot does |
+|---|---|
+| Canned WhatsApp Business auto-reply (pattern or verbatim repeat) | nudges once → waits 24h → ends |
+| "Stop messaging me", "not interested", "band karo" | `end`, and the merchant is suppressed for 30 days |
+| Abuse without an explicit stop | apologises once and offers a clean opt-out |
+| "Can you file my GST?" | declines politely and returns to the original topic |
+| "Busy, call later" / "not now" | `wait` 30 min / 24h, which later ticks honour |
+| "Ok let's do it" / "haan" / "go ahead" | delivers the draft or checklist right away (action mode) |
+| A question about price or time | answers from offers, slots or the digest item |
+
+The bot never sends the same text twice in one conversation.
+
+## Real output
+
+These are generated by `compose()` from the challenge dataset (see [`submission.jsonl`](submission.jsonl)):
+
+> **Competitor opened (dentist):** Dr. Meera, heads-up: Smile Studio opened 1.3 km from you on 8 Apr. They're advertising 'Dental Cleaning @ ₹199'. Your 'Dental Cleaning @ ₹299' is live — worth a fresh post so searchers see it first. Your last post is 22 days old. Main post highlighting your offer + reviews bhej doon? Reply YES.
+
+> **Performance dip, with peer benchmark:** Dr. Bharat, your calls dropped 50% in the last 7 days (baseline 12/week). Last 30 days: 980 views, 4 calls, CTR 1.8%. Your CTR is 1.8% vs 3.0% peer average. You have no active offer — 'Dental Cleaning @ ₹299' is the most common one in your category. Main 2 ready-to-publish Google posts bhej doon? Reply YES.
+
+> **Customer recall, sent on the merchant's behalf in Hinglish:** Hi Priya, Dr. Meera's Dental Clinic here 🦷. Aapki last visit 12 May ko thi. Aapka 6-month cleaning due hai. Aapke weekday evening preference ke hisaab se slots ready hain: Wed 5 Nov, 6pm ya Thu 6 Nov, 5pm. Dental Cleaning @ ₹299. Reply 1 for Wed 5 Nov, 2 for Thu 6 Nov.
+
+> **Chronic refill for a senior customer:** Namaste Sharma ji, Apollo Health Plus Pharmacy here. Aapki monthly dawaiyan (metformin, atorvastatin, telmisartan) 28 Apr tak khatam ho jayengi. Same dose, same brand ready hai. Senior Citizen 15% OFF lagega. Saved address pe home delivery. Reply YES to dispatch.
+
+## Run locally
+
+```bash
+pip install -r requirements.txt
+uvicorn bot:app --port 8080
+```
+
+| Env var | Effect |
+|---|---|
+| `PORT` | listen port (used by `python bot.py` and the Docker image) |
+| `VERA_STATE_FILE` | path for the state snapshot; when set, context, conversations and suppressions survive restarts |
+| `VERA_DISABLE_SEED=1` | turn off the local-dataset fallback, so only pushed context is used |
+
+## Tests
+
+```bash
+uvicorn bot:app --port 8080 &
+python tests/e2e_judge_test.py http://127.0.0.1:8080   # 48 checks across the full judge lifecycle
+python tests/restart_test.py                           # hard-kill + restart keeps judge state
+python tests/test_bot.py                               # smoke test of the replay scenarios
+```
+
+`e2e_judge_test.py` follows the judge's lifecycle: warmup (the healthz counts must match the 255 base contexts), 12 five-minute ticks, adaptive injection (new digest item, updated performance numbers, a surprise customer), replay scenarios, a burst of 10 concurrent requests, and a 480 KB payload. CI runs everything on each push, both on bare Python and against the built Docker image.
+
+`judge_simulator.py` (shipped with the challenge) also works. Without an API key it falls back to a keyword-based local scorer, which is only a rough guide. The real evaluation uses an LLM judge.
+
+## Deploy
+
+A single always-on instance with one worker. All state lives in the process and, if `VERA_STATE_FILE` is set, in a snapshot. Don't run multiple workers or replicas, and don't redeploy during a test window.
+
+| Platform | How |
+|---|---|
+| **Fly.io** (Mumbai, persistent volume) | `fly launch --no-deploy --copy-config` → `fly volumes create vera_data --region bom --size 1` → `fly deploy` (see [`fly.toml`](fly.toml)) |
+| **Railway** | New project → Deploy from GitHub repo. [`railway.json`](railway.json) selects the Dockerfile and healthcheck. Add a volume at `/data` |
+| **Render** | [`render.yaml`](render.yaml) blueprint on a paid instance with a disk. Free instances sleep when idle |
+| **Anything with Docker** | `docker build -t vera . && docker run -p 8080:8080 -v vera-data:/data vera` |
+
+## Known limitations
+
+- Messages are built from templates, with no LLM at runtime. That keeps them fast and factually safe, but the wording is less varied than a model's. The next step would be an LLM rewrite pass with a validator that rejects any number or ₹ amount not found in the contexts, falling back to the template.
+- Customer consent is only checked against explicit opt-outs. The dataset's consent scopes are too coarse to filter on without dropping valid recalls.
+
+## Repository layout
+
+```
+bot.py  composer.py  conversation_handlers.py   # the bot
+tests/                                          # e2e, restart and smoke tests
+dataset/  examples/  docs/                      # challenge data, API examples, briefs
+generate_submission.py  submission.jsonl        # the 30 canonical test pairs
+judge_simulator.py                              # challenge-provided local judge
+Dockerfile  fly.toml  railway.json  render.yaml  Procfile
+```

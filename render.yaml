@@ -1,0 +1,19 @@
+# Render Blueprint. Use a paid instance: free instances sleep after ~15 min idle,
+# and a cold start can fail the judge's warmup healthz check.
+services:
+  - type: web
+    name: magicpin-vera-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: singapore
+    numInstances: 1
+    healthCheckPath: /v1/healthz
+    autoDeploy: false            # never redeploy mid-test: a restart is the one thing that can hurt you
+    envVars:
+      - key: VERA_STATE_FILE
+        value: /data/vera_state.json
+    disk:
+      name: vera-data
+      mountPath: /data
+      sizeGB: 1

@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  judge-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt pyflakes
+      - name: Lint
+        run: python -m pyflakes bot.py composer.py conversation_handlers.py tests/
+      - name: Start bot
+        run: |
+          uvicorn bot:app --port 8080 > bot.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8080/v1/healthz && break; sleep 1; done
+      - name: Judge lifecycle test (48 checks)
+        run: python tests/e2e_judge_test.py http://127.0.0.1:8080
+      - name: Restart-resilience test
+        run: python tests/restart_test.py
+      - name: Submission regenerates cleanly
+        run: |
+          python generate_submission.py
+          test "$(wc -l < submission.jsonl)" -eq 30
+          ! grep -q 'â‚¹' submission.jsonl
+      - name: Bot log on failure
+        if: failure()
+        run: cat bot.log
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build image
+        run: docker build -t vera-bot .
+      - name: Run container
+        run: |
+          docker run -d --name vera -p 8080:8080 vera-bot
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8080/v1/healthz && break; sleep 1; done
+      - name: Judge lifecycle test against the container
+        run: python tests/e2e_judge_test.py http://127.0.0.1:8080
+      - name: Container healthcheck reports healthy
+        run: |
+          for i in $(seq 1 20); do s=$(docker inspect -f '{{.State.Health.Status}}' vera); echo "$s"; [ "$s" = healthy ] && exit 0; sleep 3; done; exit 1
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs vera
