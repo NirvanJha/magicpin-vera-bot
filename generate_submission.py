@@ -16,32 +16,32 @@ def main():
         print("test_pairs.json not found! Please run generate_dataset.py first.")
         return
         
-    with open(test_pairs_path) as f:
+    with open(test_pairs_path, encoding="utf-8") as f:
         pairs = json.load(f).get("pairs", [])
         
     print(f"Loaded {len(pairs)} test pairs.")
     
     categories = {}
     for f in (base_dir / "categories").glob("*.json"):
-        with open(f) as fp:
+        with open(f, encoding="utf-8") as fp:
             data = json.load(fp)
             categories[data["slug"]] = data
             
     merchants = {}
     for f in (base_dir / "merchants").glob("*.json"):
-        with open(f) as fp:
+        with open(f, encoding="utf-8") as fp:
             data = json.load(fp)
             merchants[data["merchant_id"]] = data
             
     customers = {}
     for f in (base_dir / "customers").glob("*.json"):
-        with open(f) as fp:
+        with open(f, encoding="utf-8") as fp:
             data = json.load(fp)
             customers[data["customer_id"]] = data
             
     triggers = {}
     for f in (base_dir / "triggers").glob("*.json"):
-        with open(f) as fp:
+        with open(f, encoding="utf-8") as fp:
             data = json.load(fp)
             triggers[data["id"]] = data
             

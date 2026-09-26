@@ -410,7 +410,7 @@ class DatasetLoader:
             cat_dir = self.dataset_dir / "categories"
             if cat_dir.exists():
                 for f in cat_dir.glob("*.json"):
-                    data = json.load(open(f))
+                    data = json.load(open(f, encoding="utf-8"))
                     self.categories[data.get("slug", f.stem)] = data
 
             for name, container, key in [
@@ -420,7 +420,7 @@ class DatasetLoader:
             ]:
                 path = self.dataset_dir / name
                 if path.exists():
-                    data = json.load(open(path))
+                    data = json.load(open(path, encoding="utf-8"))
                     items = data.get(container, data.get(container.rstrip("s"), []))
                     storage = getattr(self, container)
                     for item in items:

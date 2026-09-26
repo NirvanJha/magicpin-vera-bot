@@ -1,1072 +1,356 @@
 """
-magicpin AI Challenge — Vera Bot Implementation
-================================================
-Core candidate bot module.
-Implements:
-1. compose(category, merchant, trigger, customer=None) -> dict
-2. FastAPI Server with 5 endpoints:
-   - GET  /v1/healthz
-   - GET  /v1/metadata
-   - POST /v1/context
-   - POST /v1/tick
-   - POST /v1/reply
+magicpin AI Challenge — Vera Bot
+================================
+FastAPI server exposing the 5 judge endpoints:
+   GET  /v1/healthz   GET  /v1/metadata
+   POST /v1/context   POST /v1/tick   POST /v1/reply
+
+compose() lives in composer.py (re-exported here for generate_submission.py).
+Run:  uvicorn bot:app --host 0.0.0.0 --port 8080
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
-import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from itertools import count
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from fastapi import FastAPI, Request, Response, status
-from pydantic import BaseModel
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
+from composer import compose, parse_dt  # noqa: F401  (compose re-exported)
 from conversation_handlers import ConversationState, respond
 
 
-# =============================================================================
-# APPLICATION & STORAGE SETUP
-# =============================================================================
-
-app = FastAPI(title="magicpin Vera Bot", version="1.0.0")
+app = FastAPI(title="magicpin Vera Bot", version="2.0.0")
 START_TIME = time.time()
 
-# In-memory stores for contexts and conversations
-# Key: (scope, context_id) -> {"version": int, "payload": dict}
-contexts: Dict[tuple[str, str], Dict[str, Any]] = {}
+VALID_SCOPES = ("category", "merchant", "customer", "trigger")
+MAX_CONTEXT_BYTES = 2_000_000       # judge cap is 500 KB; allow headroom
+MAX_ACTIONS_PER_TICK = 20
+OPT_OUT_DAYS = 30
 
-# Key: conversation_id -> ConversationState
+# (scope, context_id) -> {"version", "payload", "stored_at"}   — pushed by the judge
+contexts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+# Same shape, loaded from ./dataset — used ONLY when the judge hasn't pushed that id.
+seed: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
 conversations: Dict[str, ConversationState] = {}
+sent_suppression: Set[Tuple[str, str]] = set()     # (recipient_id, suppression_key)
+sent_bodies: Set[str] = set()                      # anti-repetition
+sent_digest: Dict[str, Set[str]] = {}              # merchant_id -> digest item ids already used
+opted_out: Dict[str, datetime] = {}                # merchant_id -> suppressed until
+merchant_auto_counts: Dict[str, int] = {}
+_conv_counter = count(1)
 
 
-def pre_populate_dataset_if_empty():
-    """Optionally pre-populate base seed data if present on disk."""
-    base_dir = Path(__file__).parent / "dataset"
-    if not base_dir.exists():
+# =============================================================================
+# SEED FALLBACK
+# =============================================================================
+
+def _load_json(path: Path) -> Any:
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_seed() -> None:
+    if os.environ.get("VERA_DISABLE_SEED") == "1":
         return
-        
-    # Categories
-    cat_dir = base_dir / "categories"
-    if cat_dir.exists():
-        for f in cat_dir.glob("*.json"):
+    base = Path(__file__).parent / "dataset"
+    id_keys = {"category": "slug", "merchant": "merchant_id", "customer": "customer_id", "trigger": "id"}
+
+    def put(scope: str, obj: Any) -> None:
+        if isinstance(obj, dict) and obj.get(id_keys[scope]):
+            seed[(scope, obj[id_keys[scope]])] = {"version": 0, "payload": obj}
+
+    for scope, sub in (("category", "categories"), ("merchant", "merchants"),
+                       ("customer", "customers"), ("trigger", "triggers")):
+        for d in (base / "expanded" / sub, base / sub):
+            if d.is_dir():
+                for f in d.glob("*.json"):
+                    try:
+                        put(scope, _load_json(f))
+                    except Exception:
+                        pass
+        f = base / f"{sub}_seed.json"
+        if f.is_file():
             try:
-                data = json.load(open(f))
-                slug = data.get("slug", f.stem)
-                contexts[("category", slug)] = {"version": 1, "payload": data}
+                for obj in _load_json(f).get(sub, []):
+                    put(scope, obj)
             except Exception:
                 pass
-                
-    # Merchants, Customers, Triggers from expanded or seeds
-    for source_dir, (merch_file, cust_file, trig_file) in [
-        (base_dir / "expanded", ("merchants", "customers", "triggers")),
-        (base_dir, ("merchants_seed.json", "customers_seed.json", "triggers_seed.json"))
-    ]:
-        if source_dir.exists():
-            # Merchants
-            m_path = source_dir / merch_file
-            if m_path.is_file():
-                try:
-                    for m in json.load(open(m_path)).get("merchants", []):
-                        contexts[("merchant", m["merchant_id"])] = {"version": 1, "payload": m}
-                except Exception:
-                    pass
-            elif m_path.is_dir():
-                for f in m_path.glob("*.json"):
-                    try:
-                        m = json.load(open(f))
-                        contexts[("merchant", m["merchant_id"])] = {"version": 1, "payload": m}
-                    except Exception:
-                        pass
-                        
-            # Customers
-            c_path = source_dir / cust_file
-            if c_path.is_file():
-                try:
-                    for c in json.load(open(c_path)).get("customers", []):
-                        contexts[("customer", c["customer_id"])] = {"version": 1, "payload": c}
-                except Exception:
-                    pass
-            elif c_path.is_dir():
-                for f in c_path.glob("*.json"):
-                    try:
-                        c = json.load(open(f))
-                        contexts[("customer", c["customer_id"])] = {"version": 1, "payload": c}
-                    except Exception:
-                        pass
-
-            # Triggers
-            t_path = source_dir / trig_file
-            if t_path.is_file():
-                try:
-                    for t in json.load(open(t_path)).get("triggers", []):
-                        contexts[("trigger", t["id"])] = {"version": 1, "payload": t}
-                except Exception:
-                    pass
-            elif t_path.is_dir():
-                for f in t_path.glob("*.json"):
-                    try:
-                        t = json.load(open(f))
-                        contexts[("trigger", t["id"])] = {"version": 1, "payload": t}
-                    except Exception:
-                        pass
 
 
-# Initial seed load
-pre_populate_dataset_if_empty()
+load_seed()
 
 
 # =============================================================================
-# COMPOSITION ENGINE (CORE DELIVERABLE)
+# LOOKUPS
 # =============================================================================
 
-def format_salutation(category_slug: str, owner_name: str, language_pref: str) -> str:
-    """Format category-appropriate salutation honoring language preferences."""
-    is_hindi_mix = language_pref in ("hi", "hi-en mix")
-    
-    if category_slug == "dentists":
-        name = owner_name.replace("Dr. ", "").replace("Dr.", "").strip()
-        return f"Dr. {name}" if name else "Doctor"
-    elif category_slug == "pharmacies":
-        return f"Namaste {owner_name}" if (is_hindi_mix and owner_name) else (f"Hi {owner_name}" if owner_name else "Namaste")
-    elif category_slug in ("restaurants", "gyms", "salons"):
-        return f"Hi {owner_name}" if owner_name else "Hi there"
-    return f"Hi {owner_name}" if owner_name else "Hi"
+def get_ctx(scope: str, cid: Optional[str]) -> Tuple[Optional[str], Optional[dict]]:
+    """Exact id first (pushed, then seed); then a UNIQUE '<id>_' prefix match."""
+    if not cid:
+        return None, None
+    for store in (contexts, seed):
+        if (scope, cid) in store:
+            return cid, store[(scope, cid)]["payload"]
+    for store in (contexts, seed):
+        hits = [k[1] for k in store if k[0] == scope and (k[1].startswith(cid + "_") or cid.startswith(k[1] + "_"))]
+        if len(hits) == 1:
+            return hits[0], store[(scope, hits[0])]["payload"]
+    return cid, None
 
 
-def get_first_active_offer(merchant: dict, category: dict) -> str:
-    """Retrieve active offer or first canonical service+price offer from catalog."""
-    # 1. From merchant's own active offers
-    for offer in merchant.get("offers", []):
-        if offer.get("status") == "active":
-            return offer.get("title", "")
-            
-    # 2. From category offer catalog
-    for offer in category.get("offer_catalog", []):
-        title = offer.get("title", "")
-        if title:
-            return title
-            
-def _cat_service_word(cat_slug: str) -> str:
-    """Return category-specific anchor word for Category Fit judge dimension."""
-    mapping = {
-        "dentists": "clinic",
-        "salons": "salon",
-        "restaurants": "thali and dine-in",
-        "gyms": "HIIT and fitness",
-        "pharmacies": "medicines and wellness",
-    }
-    return mapping.get(cat_slug, "service")
+def resolve_trigger(raw: str) -> Tuple[Optional[str], Optional[dict]]:
+    tid, trg = get_ctx("trigger", raw)
+    if trg:
+        return tid, trg
+    # 'trg_research_digest_dentists' == 'trg_001_research_digest_dentists' (exact after stripping the number)
+    norm = re.sub(r"^trg_\d+_", "trg_", raw)
+    for store in (contexts, seed):
+        hits = [k[1] for k in store if k[0] == "trigger" and re.sub(r"^trg_\d+_", "trg_", k[1]) == norm]
+        if len(hits) == 1:
+            return hits[0], store[("trigger", hits[0])]["payload"]
+    return None, None
 
 
-def compose(
-    category: dict,
-    merchant: dict,
-    trigger: dict,
-    customer: Optional[dict] = None
-) -> dict:
-    """
-    Composes an outbound engagement message from the 4-context layers.
-    Returns:
-        body: str
-        cta: str ("binary", "open_ended", "none")
-        send_as: str ("vera" or "merchant_on_behalf")
-        suppression_key: str
-        rationale: str
-    """
-    cat_slug = category.get("slug", "general")
-    trigger_kind = trigger.get("kind", "")
-    trigger_scope = trigger.get("scope", "merchant")
-    payload = trigger.get("payload", {})
-    suppression_key = trigger.get("suppression_key", f"{trigger_kind}:{merchant.get('merchant_id', '')}")
-    
-    m_identity = merchant.get("identity", {})
-    owner = m_identity.get("owner_first_name", "")
-    locality = m_identity.get("locality", "")
-    city = m_identity.get("city", "")
-    m_name = m_identity.get("name", "your business")
-    perf = merchant.get("performance", {})
-    views = perf.get("views", 0)
-    calls = perf.get("calls", 0)
-    ctr = perf.get("ctr", 0.0)
-    delta_7d = perf.get("delta_7d", {})
-    views_pct = delta_7d.get("views_pct", 0)
-    calls_pct = delta_7d.get("calls_pct", 0)
-    
-    # -------------------------------------------------------------------------
-    # PATH A: CUSTOMER-FACING OUTBOUND (on behalf of merchant)
-    # -------------------------------------------------------------------------
-    if customer is not None or trigger_scope == "customer":
-        cust_id = customer.get("identity", {}) if customer else {}
-        cust_name = cust_id.get("name", "there")
-        lang_pref = cust_id.get("language_pref", "hi-en mix")
-        is_hi = "hi" in lang_pref
-        active_offer = get_first_active_offer(merchant, category)
-        
-        # Scenario A1: Recall Due (e.g. Dr. Meera cleaning recall)
-        if trigger_kind in ("recall_due", "customer_lapsed_soft", "customer_lapsed_hard"):
-            months = 5 if trigger_kind == "recall_due" else 8
-            if cat_slug == "dentists":
-                clean_offer = active_offer or "Dental Cleaning @ ₹299"
-                if is_hi:
-                    body = (
-                        f"Hi {cust_name}, {m_name} here 🦷 It's been {months} months since your last visit — "
-                        f"your 6-month cleaning recall is due. Apke liye 2 slots ready hain: Wed 6pm ya Thu 5pm. "
-                        f"{clean_offer} + complimentary fluoride varnish. Reply 1 for Wed, 2 for Thu, or tell us a time that works."
-                    )
-                else:
-                    body = (
-                        f"Hi {cust_name}, {m_name} here 🦷 It has been {months} months since your last visit — "
-                        f"your 6-month cleaning recall is due. Two slots are ready for you: Wed 6pm or Thu 5pm. "
-                        f"{clean_offer} + complimentary fluoride varnish. Reply 1 for Wed, 2 for Thu, or let us know what works."
-                    )
-                return {
-                    "body": body,
-                    "cta": "binary",
-                    "send_as": "merchant_on_behalf",
-                    "suppression_key": suppression_key,
-                    "rationale": "Customer recall reminder with verified clinic pricing, recall window anchor, and multi-choice booking slot CTA."
-                }
-                
-            elif cat_slug == "gyms":
-                if is_hi:
-                    body = (
-                        f"Hi {cust_name} 👋 {owner or m_name} from {m_name} in {locality} here. It's been about 8 weeks — "
-                        f"happens to most members, no judgment. We have added a Tue/Thu evening HIIT class (45 min, 6:30pm). "
-                        f"Want me to hold a free trial spot for you next Tue? Reply YES — no commitment, no auto-charge."
-                    )
-                else:
-                    body = (
-                        f"Hi {cust_name} 👋 {owner or m_name} from {m_name} in {locality} here. It has been about 8 weeks — "
-                        f"happens to most members, no judgment. We have added a Tue/Thu evening HIIT class (45 min, 6:30pm). "
-                        f"Want me to hold a free trial spot for you next Tue? Reply YES — no commitment, no auto-charge."
-                    )
-                return {
-                    "body": body,
-                    "cta": "binary",
-                    "send_as": "merchant_on_behalf",
-                    "suppression_key": suppression_key,
-                    "rationale": "Gym win-back message using no-shame psychological framing, concrete class duration, and zero-friction binary CTA."
-                }
-            
-            elif cat_slug == "salons":
-                body = (
-                    f"Hi {cust_name}, {owner or m_name} from {m_name} salon in {locality} here. "
-                    f"It has been {months} months since your last salon visit — we have reserved an exclusive slot for you this week. "
-                    f"{active_offer if active_offer else 'Salon care package @ ₹499 ready'}. Reply YES to confirm your slot."
-                )
-                return {
-                    "body": body,
-                    "cta": "binary",
-                    "send_as": "merchant_on_behalf",
-                    "suppression_key": suppression_key,
-                    "rationale": "Personalized salon customer recall with specific offer and binary confirmation."
-                }
-                
-            else:
-                cat_word = _cat_service_word(cat_slug)
-                body = (
-                    f"Hi {cust_name}, {owner or m_name} from {m_name} in {locality} here. "
-                    f"It has been a few months since your last {cat_word} visit — we have reserved an exclusive slot for you this week. "
-                    f"{active_offer if active_offer else 'Special care package ready'}. Reply YES to reserve your slot."
-                )
-                return {
-                    "body": body,
-                    "cta": "binary",
-                    "send_as": "merchant_on_behalf",
-                    "suppression_key": suppression_key,
-                    "rationale": "Personalized customer retention message with specific offer and binary confirmation."
-                }
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
-    # Scenario A2: Chronic Refill Due (Pharmacies or General Medical)
-        elif trigger_kind in ("chronic_refill_due", "refill_reminder"):
-            meds = payload.get("medicines", ["metformin", "atorvastatin", "telmisartan"])
-            meds_str = ", ".join(meds) if isinstance(meds, list) else str(meds)
-            refill_date = payload.get("due_date", "28 April")
-            discount_pct = 15
-            total_amt = "₹1,420"
-            savings = "₹240"
-            
-            if cat_slug == "dentists":
-                body = (
-                    f"Hi {cust_name}, {m_name} here 🦷 Friendly reminder that your routine dental recall checkup is due this week. "
-                    f"We have two slots open: Wed 5pm or Thu 4pm. Reply 1 for Wed, 2 for Thu to confirm your slot."
-                )
-                return {
-                    "body": body,
-                    "cta": "binary",
-                    "send_as": "merchant_on_behalf",
-                    "suppression_key": suppression_key,
-                    "rationale": "Dental recall reminder correctly adapted for dental practice instead of pharmacy refill."
-                }
-            
-            body = (
-                f"Namaste — {m_name} {locality} yahan. Sharma ji ki monthly medicines ({meds_str}) "
-                f"{refill_date} ko khatam hongi. Refill update is due this week. Same dose, same brand pack ready hai. Senior discount {discount_pct}% applied — "
-                f"total {total_amt} ({savings} saved). Free home delivery to saved address by 5pm tomorrow. "
-                f"Reply CONFIRM to dispatch, or call 9876543210 if any change in dosage."
-            )
-            return {
-                "body": body,
-                "cta": "binary",
-                "send_as": "merchant_on_behalf",
-                "suppression_key": suppression_key,
-                "rationale": "Pharmacy chronic medicine refill reminder with exact molecule names, precise senior discount savings, and free delivery commitment."
-            }
 
-        # Scenario A3: Appointment Tomorrow
-        elif trigger_kind in ("appointment_tomorrow", "appointment_reminder"):
-            time_slot = payload.get("time", "4:30 PM")
-            cat_word = _cat_service_word(cat_slug)
-            body = (
-                f"Hi {cust_name}! Friendly reminder — your {cat_word} appointment is due tomorrow at {time_slot} with {m_name} ({locality}). "
-                f"Our team has everything prepped for you. Reply 1 to CONFIRM or 2 if you need to reschedule."
-            )
-            return {
-                "body": body,
-                "cta": "binary",
-                "send_as": "merchant_on_behalf",
-                "suppression_key": suppression_key,
-                "rationale": "Appointment reminder with exact time, location, and binary confirmation CTA."
-            }
+def iso(dt: datetime) -> str:
+    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
-        # Scenario A4: Bridal / Wedding Package Followup or Trial Followup
-        elif trigger_kind in ("bridal_followup", "wedding_package_followup", "trial_followup"):
-            days = payload.get("days_to_wedding", payload.get("days_to_event", 196))
-            wedding_date = payload.get("wedding_date", "")
-            wedding_anchor = f" (wedding on {wedding_date})" if wedding_date else ""
-            body = (
-                f"Hi {cust_name} 💍 {owner or 'Lakshmi'} from {m_name} salon in {locality} here ({views:,} views on listing). "
-                f"{days} days to your wedding{wedding_anchor} — perfect window to start the 30-day skin-prep program before peak bridal bookings. "
-                f"₹2,499 covers 4 sessions + a take-home kit. Want me to block your preferred Saturday 4pm slot for next week? Reply YES."
-            )
-            return {
-                "body": body,
-                "cta": "binary",
-                "send_as": "merchant_on_behalf",
-                "suppression_key": suppression_key,
-                "rationale": "Bridal package followup with exact day countdown, package price, and single binary CTA."
-            }
 
-    # -------------------------------------------------------------------------
-    # PATH B: MERCHANT-FACING OUTBOUND (Vera speaking to Merchant)
-    # -------------------------------------------------------------------------
-    salutation = format_salutation(cat_slug, owner, "hi-en mix")
-    
-    # Scenario B1: Research Digest / Compliance Alert / CDE Webinar / Regulation Change
-    if trigger_kind in ("research_digest", "research_digest_release", "category_research_digest_release", "cde_webinar_dentists", "cde_opportunity", "regulation_change", "compliance_alert"):
-        digest_items = category.get("digest", [])
-        top_item = payload.get("top_item", {})
-        top_item_id = payload.get("top_item_id") or payload.get("digest_item_id")
-        
-        if not top_item and digest_items:
-            for item in digest_items:
-                if item.get("id") == top_item_id:
-                    top_item = item
-                    break
-            if not top_item:
-                top_item = digest_items[0]
-                
-        title = top_item.get("title", "Clinical update & compliance guidelines")
-        source = top_item.get("source", "Industry Notice 2026")
-        trial_n = top_item.get("trial_n", 2100)
-        
-        if trigger_kind in ("cde_opportunity", "cde_webinar_dentists") or top_item_id == "d_2026W17_ida_webinar":
-            credits = payload.get("credits", 2)
-            body = (
-                f"{salutation}, IDA Delhi announced a CDE webinar update: '{title}' ({credits} CDE credits) is due this week. "
-                f"{top_item.get('summary', 'Covers CAD/CAM workflow ROI for solo practices.')} "
-                f"Fee: {payload.get('fee', 'free_for_members')}. Want me to send the registration link and hold a spot?"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "CDE webinar opportunity anchored on specific IDA credits, topic, and member fee."
-            }
-        elif trigger_kind == "regulation_change" or top_item_id == "d_2026W17_dci_radiograph":
-            deadline = payload.get("deadline_iso", "2026-12-15")
-            deadline_str = f" (effective {deadline})" if deadline and deadline not in title else ""
-            body = (
-                f"{salutation}, regulatory update from DCI: {title}{deadline_str}. "
-                f"{top_item.get('summary', 'Maximum dose per exposure drops from 1.5 mSv to 1.0 mSv.')} "
-                f"Want me to send the 1-page SOP compliance checklist for your clinic's X-ray setup?"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "DCI regulatory compliance alert with exact effective deadline and SOP checklist CTA."
-            }
-        elif cat_slug == "dentists":
-            body = (
-                f"{salutation}, JIDA's Oct issue landed. One item relevant to your high-risk adult patients — "
-                f"{trial_n:,}-patient trial showed 3-month fluoride recall cuts caries recurrence 38% better than 6-month. "
-                f"Worth a look (2-min abstract). Want me to pull it + draft a patient-ed WhatsApp you can share? — {source}"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "External research digest with clinical-peer anchor, verifiable JIDA source citation, and low-friction reciprocity offer."
-            }
-        elif cat_slug == "pharmacies":
-            body = (
-                f"{salutation}, urgent CDSCO notification: voluntary recall on 2 atorvastatin batches (AT2024-1102, AT2024-1108) "
-                f"for sub-potency (no safety hazard, replacement advised). Checked your dispense log: 22 chronic-Rx patients "
-                f"received this batch in last 90 days. Want me to draft their WhatsApp update + replacement workflow? — CDSCO Notice p.3"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "High-urgency pharmacy compliance alert with verifiable batch numbers and affected patient count from roster."
-            }
-        else:
-            body = (
-                f"{salutation}, new industry update landed for {cat_slug} in {city or 'metro markets'}: {title}. "
-                f"Based on your recent customer volume, this could boost repeat visits. "
-                f"Want me to send a 2-minute summary and draft an action checklist? — {source}"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "Industry trend digest with verifiable source anchor and low-friction action checklist CTA."
-            }
+async def read_json(request: Request) -> Tuple[Optional[dict], Optional[str]]:
+    """Parse the body as JSON regardless of Content-Type (curl -d sends form-encoded)."""
+    raw = await request.body()
+    if len(raw) > MAX_CONTEXT_BYTES:
+        return None, "payload_too_large"
+    try:
+        data = json.loads(raw.decode("utf-8-sig") or "{}")
+    except (ValueError, UnicodeDecodeError) as e:
+        return None, f"malformed_json: {e}"
+    if not isinstance(data, dict):
+        return None, "body must be a JSON object"
+    return data, None
 
-    # Scenario B2: Performance Dip (Seasonal Reframe or Recovery Plan)
-    elif trigger_kind in ("perf_dip", "seasonal_perf_dip", "performance_dip"):
-        dip_pct = abs(int(views_pct * 100)) if views_pct else 30
-        member_count = merchant.get("customer_aggregate", {}).get("total_unique_ytd", 245)
-        active_offer = get_first_active_offer(merchant, category)
-        
-        if cat_slug == "gyms":
-            body = (
-                f"{owner or 'Karthik'}, your HIIT and gym views are down {dip_pct}% this week — but I want to flag this is the "
-                f"normal April-June acquisition lull (metro gyms average -25% to -35% in this window). "
-                f"Action: skip heavy ad spend now; instead focus retention on your {member_count} active members. "
-                f"Want me to draft a 'Summer Attendance Challenge' camp to keep them engaged through the drop?"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "Seasonal dip reframe pre-empting merchant anxiety with peer benchmarks and member retention initiative."
-            }
-        elif cat_slug == "dentists":
-            body = (
-                f"{salutation}, your clinic views dropped {dip_pct}% this week ({views:,} views, {calls} calls). "
-                f"Nearby competitors in {locality} are capturing search volume with fresh weekly posts. "
-                f"{f'Your offer {active_offer} is still active.' if active_offer else 'Dr. profile posts are due for update.'} "
-                f"I can prepare 2 Google posts to revive your search ranking. Want me to draft them?"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "Addresses clinic performance drop with verifiable metrics and ready-to-publish Google posts."
-            }
-        elif cat_slug == "salons":
-            body = (
-                f"{salutation}, your salon views dropped {dip_pct}% this week ({views:,} views, {calls} calls). "
-                f"Nearby competitors in {locality} are capturing search volume with fresh weekly posts. "
-                f"{f'Your offer {active_offer} is still active.' if active_offer else 'Salon posts are due for update.'} "
-                f"I can prepare 2 Google posts to revive your search ranking. Want me to draft them?"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "Addresses salon performance drop with verifiable metrics and ready-to-publish Google posts."
-            }
-        elif cat_slug == "restaurants":
-            body = (
-                f"{salutation}, your thali and dine-in views dropped {dip_pct}% this week ({views:,} views, {calls} calls). "
-                f"Nearby competitors in {locality} are capturing search volume with fresh weekly posts. "
-                f"{f'Your offer {active_offer} is still active.' if active_offer else 'Menu covers are due for update.'} "
-                f"I can prepare 2 Google posts to revive your search ranking. Want me to draft them?"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "Addresses restaurant performance drop with verifiable metrics and ready-to-publish Google posts."
-            }
-        else:
-            cat_word = _cat_service_word(cat_slug)
-            body = (
-                f"{salutation}, your {cat_word} profile views dropped {dip_pct}% this week ({views:,} views, {calls} calls). "
-                f"Nearby competitors in {locality} are capturing search volume with fresh weekly posts. "
-                f"{f'Your offer {active_offer} is still active.' if active_offer else 'Medicines and refill posts are due for update.'} "
-                f"I can prepare 2 Google posts to revive your search ranking. Want me to draft them?"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "Addresses performance drop with verifiable merchant metrics and ready-to-publish Google posts."
-            }
 
-    # Scenario B3: Performance Spike
-    elif trigger_kind in ("perf_spike", "performance_spike"):
-        spike_pct = abs(int(views_pct * 100)) if views_pct else 28
-        active_offer = get_first_active_offer(merchant, category)
-        cat_word = _cat_service_word(cat_slug)
-        body = (
-            f"{salutation}, your Google listing is surging — views jumped +{spike_pct}% over the last 7 days ({views:,} views, {calls} calls) for {cat_word} in {locality}. "
-            f"To convert this surge into booked walk-ins, I can prepare a highlighted weekend post with your active pricing"
-            f"{f' ({active_offer})' if active_offer else ''}. "
-            f"Takes 2 minutes to review — want me to send a draft over?"
-        )
-        return {
-            "body": body,
-            "cta": "open_ended",
-            "send_as": "vera",
-            "suppression_key": suppression_key,
-            "rationale": "Capitalizes on search surge using verifiable performance data and effortless post review CTA."
-        }
-
-    # Scenario B4: Competitor Opened
-    elif trigger_kind in ("competitor_opened", "competitor_opened_dentist"):
-        comp_name = payload.get("competitor_name", "a new competitor")
-        comp_dist = payload.get("distance_km", 1.2)
-        active_offer = get_first_active_offer(merchant, category)
-        cat_word = _cat_service_word(cat_slug)
-        body = (
-            f"{salutation}, heads-up: {comp_name} (a new competitor {cat_word} clinic) opened {comp_dist}km away in {locality} on Google Maps. "
-            f"Your listing holds strong with {views:,} monthly views, but your posts are 20+ days old. "
-            f"{f'Your offer {active_offer} is still active.' if active_offer else ''} "
-            f"Want me to publish a fresh post highlighting your services to lock in your local ranking?"
-        )
-        return {
-            "body": body,
-            "cta": "open_ended",
-            "send_as": "vera",
-            "suppression_key": suppression_key,
-            "rationale": "Locality-anchored competitive intelligence creating urgency through loss aversion."
-        }
-
-    # Scenario B5: Curious Ask Due (Engagement Builder)
-    elif trigger_kind in ("curious_ask_due", "curious_ask_studio11", "scheduled_recurring"):
-        active_offer = get_first_active_offer(merchant, category)
-        cat_word = _cat_service_word(cat_slug)
-        body = (
-            f"{salutation}! Quick update — what {cat_word} service has been most asked-for this week at {m_name} in {locality}? "
-            f"With {views:,} views on your listing, "
-            f"I will turn your answer into a Google post + a 4-line WhatsApp reply you can send customers asking about pricing. "
-            f"Takes 5 minutes. Chalega?"
-        )
-        return {
-            "body": body,
-            "cta": "open_ended",
-            "send_as": "vera",
-            "suppression_key": suppression_key,
-            "rationale": "Low-friction curious-ask leveraging asking-the-merchant hook with immediate reciprocity offer."
-        }
-
-    # Scenario B6: External Event (IPL Match, Heatwave, Festival)
-    elif trigger_kind in ("ipl_match_today", "ipl_match_special", "festival_upcoming", "weather_heatwave", "summer_demand_shift"):
-        if "ipl" in trigger_kind:
-            body = (
-                f"Quick heads-up {owner or 'Suresh'} — DC vs MI match at Arun Jaitley tonight, 7:30pm. "
-                f"Saturday IPL matches usually shift -12% dine-in covers (people watch at home). "
-                f"Skip the match-night promo today; instead push your BOGO pizza as a delivery-only special. "
-                f"Want me to draft the delivery banner + WhatsApp story? Live in 10 min."
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "High-value contrarian advice leveraging IPL match event and delivery offer."
-            }
-        elif "heatwave" in trigger_kind or "summer" in trigger_kind:
-            body = (
-                f"{salutation}, temperatures touching 42°C in {city} this week. "
-                f"Footfall drops 25% between 12-4 PM across {locality}, but evening searches peak at 7 PM. "
-                f"Want me to set up an evening-special campaign on your profile to capture the post-sunset rush?"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "Weather event leverage with footfall analytics and scheduled evening campaign."
-            }
-        else:
-            body = (
-                f"{salutation}, festival rush starts in 4 days across {locality} and {city}. "
-                f"Searches for salons in {locality} typically spike +45% in this window ({views:,} views clocked on profile). "
-                f"I have prepared a festival campaign package ready for {m_name}. Want to preview it?"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "Festival timing leverage with locality-specific demand surge stats."
-            }
-
-    # Scenario B7: Active Planning Intent (e.g. Corporate Bulk Thali / Kids Yoga)
-    elif trigger_kind in ("active_planning_intent", "corporate_thali_planning", "kids_yoga_program_drafting"):
-        if cat_slug == "restaurants":
-            body = (
-                f"{owner or 'Suresh'}, here is the starter version for your Corporate Thali package — you can edit:\n\n"
-                f"{m_name} Corporate Thali ({locality} offices):\n"
-                f"- 10 thalis @ ₹125 each (₹25 off retail) + free delivery\n"
-                f"- 25 thalis @ ₹115 each + 2 free filter coffees\n"
-                f"- 50+ thalis: ₹105 each + 1 free dosa platter\n\n"
-                f"3 tech parks in your delivery radius are ordering daily. Want me to draft a 3-line WhatsApp to send facilities managers?"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "Complete drafted corporate package artifact with tiered pricing and B2B outreach offer."
-            }
-        elif cat_slug == "gyms":
-            body = (
-                f"{owner or 'Padma'}, here is the draft for the Kids Yoga Summer Camp at {m_name} in {locality}:\n\n"
-                f"Kids Yoga & Movement (Ages 6-14) — HIIT & fitness summer camp:\n"
-                f"- 4-week program (Mon/Wed/Fri, 10-11 AM)\n"
-                f"- ₹2,499 per child (includes certificate + yoga mat)\n"
-                f"- Max batch size: 15 kids ({views:,} views this month)\n\n"
-                f"Want me to turn this into a WhatsApp flyer and publish it to your Google profile today?"
-            )
-            return {
-                "body": body,
-                "cta": "open_ended",
-                "send_as": "vera",
-                "suppression_key": suppression_key,
-                "rationale": "Complete program artifact with concrete pricing, schedule, and Google post flyer offer."
-            }
-
-    # Scenario B8: Renewal Due / Dormancy
-    elif trigger_kind in ("renewal_due", "dormant_with_vera"):
-        sub = merchant.get("subscription", {})
-        days_left = sub.get("days_remaining", payload.get("days_remaining", 14))
-        cat_word = _cat_service_word(cat_slug)
-        active_offer = get_first_active_offer(merchant, category)
-        body = (
-            f"{salutation}, your Vera Pro subscription renewal update: {days_left} days remaining. "
-            f"Over the last 30 days, your {cat_word} profile drove {views:,} views, {calls} direct calls, and {perf.get('directions', 45)} direction requests in {locality}. "
-            f"{f'Your offer {active_offer} is active.' if active_offer else ''} "
-            f"Reply RENEW to continue uninterrupted, or let me know if you would like to review performance."
-        )
-        return {
-            "body": body,
-            "cta": "binary",
-            "send_as": "vera",
-            "suppression_key": suppression_key,
-            "rationale": "Subscription renewal nudge anchoring on verifiable 30-day ROI metrics."
-        }
-
-    # Scenario B9: Supply Alert / Drug Recall
-    elif trigger_kind in ("supply_alert", "supply_recall"):
-        batches = payload.get("affected_batches", ["AT2024-1102", "AT2024-1108"])
-        batches_str = ", ".join(batches) if isinstance(batches, list) else str(batches)
-        molecule = payload.get("molecule", "atorvastatin")
-        body = (
-            f"{salutation}, urgent CDSCO Notice update: voluntary recall on {len(batches) if isinstance(batches, list) else 2} {molecule} medicines batch "
-            f"({batches_str}) for sub-potency (no safety hazard, replacement advised). "
-            f"Checked your dispense log: 22 chronic-Rx patients received this batch in last 90 days. "
-            f"Want me to draft their WhatsApp update + replacement workflow? — CDSCO Notice p.3"
-        )
-        return {
-            "body": body,
-            "cta": "open_ended",
-            "send_as": "vera",
-            "suppression_key": suppression_key,
-            "rationale": "High-urgency pharmacy compliance alert with verifiable batch numbers and affected patient count from roster."
-        }
-
-    # Scenario B10: Winback Eligible (merchant-level churn cohort)
-    elif trigger_kind in ("winback_eligible", "winback_campaign_due"):
-        lapsed = payload.get("lapsed_customers_added_since_expiry", 24)
-        days = payload.get("days_since_expiry", 38)
-        dip_pct = abs(int(payload.get("perf_dip_pct", -0.30) * 100))
-        active_offer = get_first_active_offer(merchant, category)
-        cat_word = "salon" if cat_slug == "salons" else _cat_service_word(cat_slug)
-        body = (
-            f"{salutation}, {lapsed} regular {cat_word} clients have lapsed over the last {days} days at {m_name} in {locality} ({views:,} views clocked), "
-            f"causing a {dip_pct}% drop in repeat visits. "
-            f"{f'Your offer {active_offer} is active.' if active_offer else f'We can launch a win-back salon offer @ ₹499.'} "
-            f"Want me to draft a 3-line win-back WhatsApp campaign to reactivate them this week?"
-        )
-        return {
-            "body": body,
-            "cta": "open_ended",
-            "send_as": "vera",
-            "suppression_key": suppression_key,
-            "rationale": "Addresses lapsed customer cohort with specific churn analytics and targeted win-back offer."
-        }
-
-    # Scenario B11: Milestone Reached / Imminent
-    elif trigger_kind in ("milestone_reached", "milestone_imminent"):
-        val = payload.get("value_now", 145)
-        target = payload.get("milestone_value", 150)
-        metric = payload.get("metric", "5-star reviews").replace("_", " ")
-        active_offer = get_first_active_offer(merchant, category)
-        cat_word = _cat_service_word(cat_slug)
-        body = (
-            f"{salutation}, huge milestone update for {m_name} in {locality}: you are just {target - val} away from {target} {metric} "
-            f"({val} clocked so far, {views:,} views this month). "
-            f"{f'Your {cat_word} offer {active_offer} is live.' if active_offer else f'Your {cat_word} covers are steady.'} "
-            f"Want me to draft a celebratory Google post + WhatsApp story to cross {target} this week?"
-        )
-        return {
-            "body": body,
-            "cta": "open_ended",
-            "send_as": "vera",
-            "suppression_key": suppression_key,
-            "rationale": "Celebrates impending merchant milestone with concrete progress delta and community visibility CTA."
-        }
-
-    # Scenario B12: Review Theme Emerged
-    elif trigger_kind in ("review_theme_emerged", "review_theme"):
-        count = payload.get("occurrences_30d", 4)
-        theme = payload.get("theme", "delivery_late").replace("_", " ")
-        quote = payload.get("common_quote", "took 50 mins for a 15 min ride")
-        cat_word = _cat_service_word(cat_slug)
-        body = (
-            f"{salutation}, review theme update for {m_name} {cat_word} in {locality}: {count} customer reviews this week flagged "
-            f"{theme} issues (\"{quote}\"). To protect your listing rating, I can draft a proactive reply template + "
-            f"a ₹100 next-order apology voucher for affected customers. Want me to send the draft?"
-        )
-        return {
-            "body": body,
-            "cta": "open_ended",
-            "send_as": "vera",
-            "suppression_key": suppression_key,
-            "rationale": "Proactive reputation defense addressing emergent review cluster with apology voucher resolution."
-        }
-
-    # Scenario B13: Category Seasonal (demand shift)
-    elif trigger_kind in ("category_seasonal",):
-        trends = payload.get("trends", [])
-        trends_str = ", ".join(t.replace("_", " ") for t in trends[:3]) if trends else "seasonal items"
-        cat_word = _cat_service_word(cat_slug)
-        body = (
-            f"{salutation}, summer update for {m_name} {cat_word} in {locality}: daytime footfall drops 25% between 12-4 PM, "
-            f"but evening demand for {trends_str} surges 40% after 6 PM ({views:,} views on listing). "
-            f"Want me to publish a seasonal medicines shelf-rotation flyer + WhatsApp update for local residents?"
-        )
-        return {
-            "body": body,
-            "cta": "open_ended",
-            "send_as": "vera",
-            "suppression_key": suppression_key,
-            "rationale": "Seasonal demand shift capitalizing on evening footfall surge with category-appropriate products."
-        }
-
-    # Scenario B14: GBP Unverified
-    elif trigger_kind in ("gbp_unverified",):
-        uplift = int(payload.get("estimated_uplift_pct", 0.30) * 100)
-        cat_word = _cat_service_word(cat_slug)
-        body = (
-            f"{salutation}, quick update: your {m_name} {cat_word} listing in {locality} is not yet verified on Google Maps. "
-            f"Verified listings get +{uplift}% more views and calls ({views:,} views this month). "
-            f"Verification takes 5 minutes via postcard or phone call. Want me to walk you through the process?"
-        )
-        return {
-            "body": body,
-            "cta": "open_ended",
-            "send_as": "vera",
-            "suppression_key": suppression_key,
-            "rationale": "GBP verification nudge anchoring on specific uplift metrics and low-friction verification path."
-        }
-
-    # Fallback / Generic Outbound
-    active_offer = get_first_active_offer(merchant, category)
-    cat_word = _cat_service_word(cat_slug)
-    body = (
-        f"{salutation}, quick update for {m_name} {cat_word} in {locality}: your profile clocked {views:,} views this month "
-        f"with a CTR of {ctr:.1%}. {f'Your offer {active_offer} is live.' if active_offer else 'Google posts are due for update.'} "
-        f"I drafted a 2-minute visibility update to boost walk-ins this week. Chalega?"
-    )
-    return {
-        "body": body,
-        "cta": "open_ended",
-        "send_as": "vera",
-        "suppression_key": suppression_key,
-        "rationale": "Personalized merchant nudge with verifiable performance metrics and ready-to-review draft."
-    }
+def bad_request(reason: str, details: str = "", code: int = 400) -> JSONResponse:
+    return JSONResponse({"accepted": False, "reason": reason, "details": details}, status_code=code)
 
 
 # =============================================================================
-# FASTAPI HTTP ENDPOINTS
+# ENDPOINTS
 # =============================================================================
 
 @app.get("/")
 async def root():
-    return {
-        "status": "ok",
-        "service": "magicpin-vera-bot",
-        "endpoints": [
-            "POST /v1/context",
-            "POST /v1/tick",
-            "POST /v1/reply",
-            "GET /v1/healthz",
-            "GET /v1/metadata"
-        ]
-    }
+    return {"status": "ok", "service": "magicpin-vera-bot",
+            "endpoints": ["GET /v1/healthz", "GET /v1/metadata", "POST /v1/context", "POST /v1/tick", "POST /v1/reply"]}
 
 
 @app.get("/v1/healthz")
 @app.get("/healthz")
 async def healthz():
-    """Liveness probe returning uptime and loaded context counts."""
-    counts = {"category": 0, "merchant": 0, "customer": 0, "trigger": 0}
-    for (scope, _), _ in contexts.items():
-        if scope in counts:
-            counts[scope] += 1
-            
-    return {
-        "status": "ok",
-        "uptime_seconds": int(time.time() - START_TIME),
-        "contexts_loaded": counts
-    }
+    counts = {s: 0 for s in VALID_SCOPES}
+    for (scope, _) in list(contexts):
+        counts[scope] = counts.get(scope, 0) + 1
+    return {"status": "ok", "uptime_seconds": int(time.time() - START_TIME), "contexts_loaded": counts}
 
 
 @app.get("/v1/metadata")
 @app.get("/metadata")
 async def metadata():
-    """Returns bot identity, model details, and approach description."""
     return {
         "team_name": "magicpin-ai-mastery",
         "team_members": ["Nirvan Jha"],
-        "model": "vera-engagement-hybrid-v1",
-        "approach": "context-guided dynamic composer with Cialdini compulsion levers and zero-hallucination guardrails",
+        "model": "deterministic-grounded-composer (no LLM at runtime)",
+        "approach": "trigger-kind dispatch over 4 context layers; every fact sourced from pushed context; "
+                    "suppression + per-merchant dedup on tick; intent-classified multi-turn replies",
         "contact_email": "nirvan.jha.ug23@nsut.ac.in",
-        "version": "1.0.0",
-        "submitted_at": "2026-04-26T08:00:00Z"
-    }
-
-
-class ContextPushRequest(BaseModel):
-    scope: str
-    context_id: str
-    version: int
-    payload: Dict[str, Any]
-    delivered_at: Optional[str] = None
-
-
-@app.get("/v1/context")
-@app.get("/context")
-async def get_context_info():
-    """Friendly browser helper for POST /v1/context."""
-    return {
-        "status": "ok",
-        "endpoint": "POST /v1/context",
-        "description": "This is a POST endpoint used by the judge to ingest context payloads.",
-        "interactive_docs": "http://localhost:8080/docs",
-        "sample_curl": "curl -X POST http://localhost:8080/v1/context -H 'Content-Type: application/json' -d '{\"scope\":\"category\",\"context_id\":\"dentists\",\"version\":1,\"payload\":{\"slug\":\"dentists\"}}'"
+        "version": "2.0.0",
+        "submitted_at": "2026-04-26T08:00:00Z",
     }
 
 
 @app.post("/v1/context")
 @app.post("/context")
-async def push_context(body: ContextPushRequest, response: Response):
-    """
-    Ingests category, merchant, customer, or trigger context.
-    Idempotent by (scope, context_id, version).
-    """
-    key = (body.scope, body.context_id)
+async def push_context(request: Request):
+    data, err = await read_json(request)
+    if err:
+        return bad_request("payload_too_large" if err == "payload_too_large" else "malformed", err,
+                           413 if err == "payload_too_large" else 400)
+    scope, cid, version, payload = data.get("scope"), data.get("context_id"), data.get("version"), data.get("payload")
+    if scope not in VALID_SCOPES:
+        return bad_request("invalid_scope", f"scope must be one of {list(VALID_SCOPES)}")
+    if not isinstance(cid, str) or not cid.strip():
+        return bad_request("invalid_context_id", "context_id must be a non-empty string")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return bad_request("invalid_version", "version must be an integer")
+    if not isinstance(payload, dict):
+        return bad_request("invalid_payload", "payload must be a JSON object")
+
+    key = (scope, cid)
     cur = contexts.get(key)
-    
-    # Handle versioning according to spec:
-    # 1. Higher version replaces older version -> accepted: True
-    # 2. Identical version is idempotent no-op -> accepted: True
-    # 3. Strictly lower version is stale conflict -> accepted: False, status 409 Conflict
-    if cur and cur.get("version", 0) > body.version:
-        response.status_code = status.HTTP_409_CONFLICT
-        return {
-            "accepted": False,
-            "reason": "stale_version",
-            "current_version": cur.get("version", 0)
-        }
-        
-    contexts[key] = {
-        "version": body.version,
-        "payload": body.payload
-    }
-    
-    return {
-        "accepted": True,
-        "ack_id": f"ack_{body.context_id}_v{body.version}",
-        "stored_at": datetime.utcnow().isoformat() + "Z"
-    }
+    if cur and cur["version"] > version:
+        return JSONResponse({"accepted": False, "reason": "stale_version", "current_version": cur["version"]},
+                            status_code=409)
+    if cur and cur["version"] == version:  # idempotent no-op: keep the original payload
+        return {"accepted": True, "ack_id": f"ack_{cid}_v{version}", "stored_at": cur["stored_at"]}
 
-
-
-class TickRequest(BaseModel):
-    now: str
-    available_triggers: List[str] = []
-
-
-@app.get("/v1/tick")
-@app.get("/tick")
-async def get_tick_info():
-    """Friendly browser helper for POST /v1/tick."""
-    return {
-        "status": "ok",
-        "endpoint": "POST /v1/tick",
-        "description": "This is a POST endpoint called by the judge during simulation ticks to produce proactive actions.",
-        "interactive_docs": "http://localhost:8080/docs",
-        "sample_curl": "curl -X POST http://localhost:8080/v1/tick -H 'Content-Type: application/json' -d '{\"now\":\"2026-04-26T10:30:00Z\",\"available_triggers\":[\"trg_013_corporate_thali_planning\"]}'"
-    }
+    stored_at = iso(now_utc())
+    contexts[key] = {"version": version, "payload": payload, "stored_at": stored_at}
+    return {"accepted": True, "ack_id": f"ack_{cid}_v{version}", "stored_at": stored_at}
 
 
 @app.post("/v1/tick")
 @app.post("/tick")
-async def tick(body: TickRequest):
-    """
-    Periodic tick wake-up.
-    Iterates over available triggers, resolves contexts, and produces outbound actions.
-    """
-    actions = []
-    
-    for raw_trg_id in body.available_triggers:
-        trg_id = raw_trg_id
-        trg_ctx = contexts.get(("trigger", trg_id), {}).get("payload")
-        if not trg_ctx:
-            # Fuzzy / prefix-tolerant trigger lookup (e.g. trg_research_digest_dentists -> trg_001_research_digest_dentists)
-            clean_search = re.sub(r"^trg_\d+_", "trg_", raw_trg_id)
-            for (scope, cid), val in contexts.items():
-                if scope == "trigger":
-                    cid_norm = re.sub(r"^trg_\d+_", "trg_", cid)
-                    if cid == raw_trg_id or cid_norm == clean_search or raw_trg_id in cid or cid in raw_trg_id:
-                        trg_ctx = val.get("payload")
-                        trg_id = cid
-                        break
-        if not trg_ctx:
+async def tick(request: Request):
+    data, err = await read_json(request)
+    if err:
+        return JSONResponse({"actions": [], "error": err}, status_code=400)
+    try:
+        return {"actions": _run_tick(data)}
+    except Exception as e:  # never 500 on the judge
+        return {"actions": [], "error": f"internal: {type(e).__name__}"}
+
+
+def _run_tick(data: dict) -> List[dict]:
+    now = parse_dt(data.get("now")) or now_utc()
+    raw_ids = data.get("available_triggers") or []
+    if not isinstance(raw_ids, list):
+        return []
+
+    candidates = []
+    seen: Set[str] = set()
+    for order, raw in enumerate(raw_ids):
+        if not isinstance(raw, str):
             continue
-            
-        merchant_id = trg_ctx.get("merchant_id")
-        merchant_ctx = contexts.get(("merchant", merchant_id), {}).get("payload") if merchant_id else None
-        if not merchant_ctx and merchant_id:
-            # Prefix-tolerant merchant lookup (e.g. m_001_drmeera -> m_001_drmeera_dentist_delhi)
-            for (scope, mid), val in contexts.items():
-                if scope == "merchant" and (mid.startswith(merchant_id) or merchant_id.startswith(mid) or merchant_id in mid):
-                    merchant_ctx = val.get("payload")
-                    break
-        if not merchant_ctx:
+        tid, trg = resolve_trigger(raw)
+        if not trg or tid in seen:
             continue
-            
-        cat_slug = merchant_ctx.get("category_slug")
-        category_ctx = contexts.get(("category", cat_slug), {}).get("payload") if cat_slug else None
-        if not category_ctx:
+        seen.add(tid)
+
+        # No expires_at filtering: available_triggers is the judge's own list of what's active
+        # right now, and its simulated clock may not line up with the dataset's dates.
+        mid, merchant = get_ctx("merchant", trg.get("merchant_id"))
+        if not merchant:
             continue
-            
-        customer_id = trg_ctx.get("customer_id")
-        customer_ctx = contexts.get(("customer", customer_id), {}).get("payload") if customer_id else None
-        
-        # Compose message using 4-context engine
-        composed = compose(category_ctx, merchant_ctx, trg_ctx, customer_ctx)
-        
-        owner = merchant_ctx.get("identity", {}).get("owner_first_name", "")
+        if mid in opted_out and opted_out[mid] > now:
+            continue
+        slug = merchant.get("category_slug") or (trg.get("payload") or {}).get("category")
+        _, category = get_ctx("category", slug)
+        if not category:
+            continue
+        cust_id, customer = get_ctx("customer", trg.get("customer_id"))
+        if trg.get("scope") == "customer" and not customer:
+            continue  # can't address a customer we know nothing about
+        recipient = cust_id if customer else mid
+        skey = trg.get("suppression_key") or f"{trg.get('kind')}:{tid}"
+        if (recipient, skey) in sent_suppression:
+            continue
+        urgency = trg.get("urgency") if isinstance(trg.get("urgency"), (int, float)) else 0
+        candidates.append((-urgency, order, tid, trg, mid, merchant, category, cust_id if customer else None,
+                           customer, recipient, skey))
+
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    actions: List[dict] = []
+    used_recipients: Set[str] = set()
+    for (_, _, tid, trg, mid, merchant, category, cust_id, customer, recipient, skey) in candidates:
+        if len(actions) >= MAX_ACTIONS_PER_TICK:
+            break
+        if recipient in used_recipients:
+            continue  # one message per recipient per tick; the rest wait for the next tick
+        out = compose(category, merchant, trg, customer, now=now, exclude_items=sent_digest.get(mid, set()))
+        body = out["body"]
+        if not body or body in sent_bodies:
+            continue
+
+        conv_id = f"conv_{recipient}_{trg.get('kind', 'msg')}_{next(_conv_counter)}"
+        state = ConversationState(conversation_id=conv_id, merchant_id=mid, customer_id=cust_id,
+                                  trigger_id=tid, trigger_kind=trg.get("kind"))
+        state.turns.append({"from": "vera", "msg": body, "turn": 1})
+        conversations[conv_id] = state
+
+        used_recipients.add(recipient)
+        sent_bodies.add(body)
+        sent_suppression.add((recipient, skey))
+        if out.get("digest_item_id"):
+            sent_digest.setdefault(mid, set()).add(out["digest_item_id"])
+
         actions.append({
-            "conversation_id": f"conv_{merchant_id}_{trg_id}",
-            "merchant_id": merchant_id,
-            "customer_id": customer_id,
-            "send_as": composed["send_as"],
-            "trigger_id": trg_id,
-            "template_name": "vera_outbound_v1",
-            "template_params": [owner, merchant_ctx.get("identity", {}).get("name", "")],
-            "body": composed["body"],
-            "cta": composed["cta"],
-            "suppression_key": composed["suppression_key"],
-            "rationale": composed["rationale"]
+            "conversation_id": conv_id,
+            "merchant_id": mid,
+            "customer_id": cust_id,
+            "send_as": out["send_as"],
+            "trigger_id": tid,
+            "template_name": f"vera_{out.get('kind') or 'generic'}_v1",
+            "template_params": out.get("template_params") or [],
+            "body": body,
+            "cta": out["cta"],
+            "suppression_key": out["suppression_key"],
+            "rationale": out["rationale"],
         })
-        
-    return {"actions": actions}
-
-
-class ReplyRequest(BaseModel):
-    conversation_id: str
-    merchant_id: Optional[str] = None
-    customer_id: Optional[str] = None
-    from_role: str = "merchant"
-    message: str
-    received_at: Optional[str] = None
-    turn_number: int = 1
-
-
-@app.get("/v1/reply")
-@app.get("/reply")
-async def get_reply_info():
-    """Friendly browser helper for POST /v1/reply."""
-    return {
-        "status": "ok",
-        "endpoint": "POST /v1/reply",
-        "description": "This is a POST endpoint called by the judge with simulated merchant or customer replies.",
-        "interactive_docs": "http://localhost:8080/docs",
-        "sample_curl": "curl -X POST http://localhost:8080/v1/reply -H 'Content-Type: application/json' -d '{\"conversation_id\":\"conv_1\",\"merchant_id\":\"m_001\",\"from_role\":\"merchant\",\"message\":\"Ok lets do it\",\"turn_number\":2}'"
-    }
+    return actions
 
 
 @app.post("/v1/reply")
 @app.post("/reply")
-async def handle_reply(body: ReplyRequest):
+async def handle_reply(request: Request):
+    data, err = await read_json(request)
+    if err:
+        return JSONResponse({"action": "wait", "wait_seconds": 1800, "rationale": f"bad request: {err}"}, status_code=400)
+    conv_id = data.get("conversation_id")
+    message = data.get("message")
+    if not isinstance(conv_id, str) or not conv_id or not isinstance(message, str):
+        return JSONResponse({"action": "wait", "wait_seconds": 1800,
+                             "rationale": "conversation_id and message are required"}, status_code=400)
+    try:
+        return _run_reply(data, conv_id, message)
+    except Exception as e:
+        return {"action": "wait", "wait_seconds": 1800, "rationale": f"internal fallback ({type(e).__name__})"}
 
 
-    """
-    Handles merchant or customer replies in multi-turn conversation.
-    Dispatches to conversation_handlers.respond.
-    """
-    conv = conversations.setdefault(
-        body.conversation_id,
-        ConversationState(
-            conversation_id=body.conversation_id,
-            merchant_id=body.merchant_id,
-            customer_id=body.customer_id
-        )
-    )
-    
-    # Record inbound turn
-    conv.turns.append({
-        "from": body.from_role,
-        "msg": body.message,
-        "turn": body.turn_number
-    })
-    
-    merchant_ctx = contexts.get(("merchant", body.merchant_id), {}).get("payload") if body.merchant_id else None
-    cat_slug = merchant_ctx.get("category_slug") if merchant_ctx else None
-    category_ctx = contexts.get(("category", cat_slug), {}).get("payload") if cat_slug else None
-    
-    result = respond(
-        state=conv,
-        merchant_message=body.message,
-        merchant_context=merchant_ctx,
-        category_context=category_ctx
-    )
-    
-    # Record bot response turn if sending
-    if result.get("action") == "send":
-        conv.turns.append({
-            "from": "vera",
-            "msg": result.get("body", ""),
-            "turn": body.turn_number + 1
-        })
-        
+def _run_reply(data: dict, conv_id: str, message: str) -> dict:
+    from_role = data.get("from_role") or "merchant"
+    state = conversations.get(conv_id)
+    if state is None:
+        state = ConversationState(conversation_id=conv_id, merchant_id=data.get("merchant_id"),
+                                  customer_id=data.get("customer_id"))
+        conversations[conv_id] = state
+    state.merchant_id = state.merchant_id or data.get("merchant_id")
+    state.customer_id = state.customer_id or data.get("customer_id")
+
+    mid, merchant = get_ctx("merchant", state.merchant_id)
+    slug = (merchant or {}).get("category_slug")
+    _, category = get_ctx("category", slug)
+    _, trigger = get_ctx("trigger", state.trigger_id)
+    _, customer = get_ctx("customer", state.customer_id) if from_role == "customer" or state.customer_id else (None, None)
+
+    state.turns.append({"from": from_role, "msg": message, "turn": data.get("turn_number")})
+    now = parse_dt(data.get("received_at")) or now_utc()
+
+    result = respond(state, message, merchant_context=merchant, category_context=category,
+                     trigger_context=trigger, customer_context=customer, from_role=from_role,
+                     merchant_auto_count=merchant_auto_counts.get(mid or "", 0), now=now)
+
+    if mid:
+        merchant_auto_counts[mid] = state.auto_reply_count
+        if state.closed_reason == "opt_out" and result["action"] == "end" and from_role == "merchant":
+            opted_out[mid] = now + timedelta(days=OPT_OUT_DAYS)
+
+    if result["action"] == "send":
+        state.turns.append({"from": "vera", "msg": result.get("body", ""), "turn": (data.get("turn_number") or 0) + 1})
     return result
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

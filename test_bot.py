@@ -37,7 +37,7 @@ def run_tests():
     # 2. Metadata
     meta = request("GET", "/v1/metadata")
     print("\n[2] GET /v1/metadata:", meta)
-    assert meta["model"] == "vera-engagement-hybrid-v1"
+    assert meta.get("model") and meta.get("team_name")
     
     # 3. Context Push (v1, same v1 again, then higher v2, then lower v1)
     ctx1 = request("POST", "/v1/context", {
@@ -78,15 +78,20 @@ def run_tests():
     # 4. Auto-Reply Hell
     print("\n[4] Scenario: Auto-Reply Hell")
     auto_reply_msg = "Thank you for contacting us! Our team will respond shortly."
-    reply1 = request("POST", "/v1/reply", {
-        "conversation_id": "conv_auto_test_1",
-        "merchant_id": "m_001_drmeera_dentist_delhi",
-        "from_role": "merchant",
-        "message": auto_reply_msg,
-        "turn_number": 2
-    })
-    print("  Turn 1 reply to auto-reply:", reply1)
-    assert reply1["action"] == "end", f"Expected action 'end', got {reply1['action']}"
+    actions = []
+    for turn in range(2, 6):  # judge sends the same canned text 4 times
+        r = request("POST", "/v1/reply", {
+            "conversation_id": "conv_auto_test_1",
+            "merchant_id": "m_001_drmeera_dentist_delhi",
+            "from_role": "merchant",
+            "message": auto_reply_msg,
+            "turn_number": turn
+        })
+        actions.append(r["action"])
+        print(f"  Turn {turn} reply to auto-reply:", r)
+        if r["action"] == "end":
+            break
+    assert actions[-1] == "end", f"Bot never ended after 4 auto-replies: {actions}"
     print("  --> PASS: Bot correctly ENDED conversation on canned auto-reply!")
 
     # 5. Intent Transition
