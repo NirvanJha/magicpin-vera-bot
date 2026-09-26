@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vera Test Console</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --ink: #1d2330; --muted: #667085; --line: #e3e6eb;
+    --accent: #4f46e5; --accent-ink: #ffffff; --ok: #12805c; --warn: #b45309; --bad: #c0362c;
+    --vera: #e8f4ee; --vera-ink: #123a2a; --me: #ffffff; --chat: #efeae2; --pill: #eef0f4; --code: #f6f7f9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1218; --panel: #171b23; --ink: #e6e8ee; --muted: #98a2b3; --line: #2a303b;
+      --accent: #818cf8; --accent-ink: #0f1218; --ok: #34d399; --warn: #fbbf24; --bad: #f87171;
+      --vera: #16392b; --vera-ink: #d6f5e6; --me: #232a36; --chat: #0b141a; --pill: #222835; --code: #11151c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1218; --panel: #171b23; --ink: #e6e8ee; --muted: #98a2b3; --line: #2a303b;
+    --accent: #818cf8; --accent-ink: #0f1218; --ok: #34d399; --warn: #fbbf24; --bad: #f87171;
+    --vera: #16392b; --vera-ink: #d6f5e6; --me: #232a36; --chat: #0b141a; --pill: #222835; --code: #11151c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  header input { flex: 1 1 260px; min-width: 0; }
+  input, select, textarea, button { font: inherit; color: inherit; }
+  input, select, textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+  textarea { width: 100%; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  button { cursor: pointer; border: 1px solid var(--line); background: var(--pill); border-radius: 8px; padding: 7px 12px; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button.danger { color: var(--bad); border-color: var(--bad); background: transparent; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--pill); font-size: 12px; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .banner { padding: 8px 16px; background: color-mix(in srgb, var(--warn) 15%, var(--panel)); color: var(--ink); border-bottom: 1px solid var(--line); font-size: 13px; }
+  main { display: grid; grid-template-columns: 320px minmax(0, 1fr) 380px; gap: 12px; padding: 12px; }
+  section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-width: 0; }
+  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+  .step { margin-bottom: 16px; } .step:last-child { margin-bottom: 0; }
+  .step label { display: block; font-weight: 600; margin-bottom: 6px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .full { width: 100%; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .acks div { font-size: 12px; font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+  .convlist button { display: block; width: 100%; text-align: left; margin-bottom: 6px; background: var(--bg); }
+  .convlist button.active { border-color: var(--accent); }
+  .chat { background: var(--chat); border-radius: 10px; padding: 12px; height: 460px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .bubble { max-width: 85%; padding: 8px 11px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 1px 1px rgba(0,0,0,.08); }
+  .bubble.vera { background: var(--vera); color: var(--vera-ink); align-self: flex-start; border-top-left-radius: 2px; }
+  .bubble.me { background: var(--me); align-self: flex-end; border-top-right-radius: 2px; }
+  .bubble .meta { display: block; margin-top: 4px; font-size: 11px; opacity: .7; }
+  .sys { align-self: center; font-size: 12px; padding: 3px 10px; border-radius: 999px; background: var(--pill); color: var(--muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+  .chips button { font-size: 12px; padding: 4px 10px; border-radius: 999px; }
+  .composer { display: flex; gap: 8px; } .composer input { flex: 1; min-width: 0; }
+  .empty { color: var(--muted); text-align: center; margin: auto; padding: 20px; }
+  .log { max-height: 640px; overflow-y: auto; }
+  .log details { border-bottom: 1px solid var(--line); padding: 6px 0; }
+  .log summary { cursor: pointer; font-family: ui-monospace, Consolas, monospace; font-size: 12px; display: flex; gap: 8px; }
+  .log pre { background: var(--code); padding: 8px; border-radius: 6px; font-size: 11px; overflow-x: auto; max-height: 260px; margin: 6px 0 0; }
+  .s2 { color: var(--ok); } .s4 { color: var(--warn); } .s5, .s0 { color: var(--bad); }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } .chat { height: 380px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vera Test Console</h1>
+  <input id="base" aria-label="Bot base URL" spellcheck="false">
+  <button id="useLive">Live</button>
+  <button id="useLocal">Local :8080</button>
+  <span class="pill" id="health"><span class="dot"></span><span>checking…</span></span>
+  <button id="themeBtn" title="Toggle theme">◐</button>
+</header>
+<div class="banner" id="liveBanner" hidden>You're testing the <b>live</b> bot. Run <b>Teardown</b> when you're done, so the judge finds it empty. Don't use this during the evaluation window.</div>
+
+<main>
+  <section class="card">
+    <h2>1 · Scenario</h2>
+    <div class="step">
+      <label for="scenario">Pick a scenario</label>
+      <select id="scenario" class="full"></select>
+      <p class="muted" id="scenarioInfo"></p>
+      <div class="row">
+        <button class="primary" id="pushBtn">Push context</button>
+        <button class="primary" id="tickBtn">Run tick</button>
+      </div>
+      <p class="muted">Push sends the category, merchant, customer and trigger to <code>/v1/context</code>. Tick asks <code>/v1/tick</code> what Vera wants to send.</p>
+      <div class="acks" id="acks"></div>
+    </div>
+    <div class="step">
+      <label>Conversations</label>
+      <div class="convlist" id="convlist"><p class="muted">Run a tick to start one.</p></div>
+    </div>
+    <div class="step">
+      <label>Bot</label>
+      <div class="row">
+        <button id="metaBtn">Metadata</button>
+        <button id="healthBtn">Healthz</button>
+        <button class="danger" id="teardownBtn">Teardown</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>2 · Conversation</h2>
+    <div class="muted" id="convHeader">No conversation selected.</div>
+    <div class="chat" id="chat"><div class="empty">Push a scenario, run a tick, and Vera's first message shows up here.</div></div>
+    <div class="chips" id="chips"></div>
+    <form class="composer" id="composer">
+      <input id="msg" placeholder="Reply as the merchant…" autocomplete="off" disabled>
+      <button class="primary" id="sendBtn" disabled>Send</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>3 · Inspector</h2>
+    <details>
+      <summary style="cursor:pointer;font-weight:600">Custom request</summary>
+      <div class="row" style="margin:8px 0">
+        <select id="cMethod"><option>POST</option><option>GET</option></select>
+        <input id="cPath" value="/v1/reply" style="flex:1;min-width:0">
+      </div>
+      <textarea id="cBody" rows="7">{"conversation_id": "custom_1", "merchant_id": "m_001_drmeera_dentist_delhi", "from_role": "merchant", "message": "Ok lets do it. Whats next?", "turn_number": 2}</textarea>
+      <div class="row" style="margin-top:8px"><button class="primary" id="cSend">Send request</button></div>
+    </details>
+    <div class="row" style="justify-content:space-between;margin:12px 0 4px">
+      <span class="muted">Every request, newest first</span><button id="clearLog">Clear</button>
+    </div>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<script>
+const DATA = __SAMPLES__;
+const LIVE = "https://magicpin-vera-bot-vtz2.onrender.com";
+const LOCAL = "http://127.0.0.1:8080";
+const $ = (id) => document.getElementById(id);
+const convs = {};
+let active = null;
+
+function store(k, v) { try { v === undefined ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} }
+function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+
+const baseEl = $("base");
+baseEl.value = load("vera.base") || (location.protocol.startsWith("http") ? location.origin : LIVE);  // served by the bot -> talk to that bot
+function base() { return baseEl.value.trim().replace(/\/+$/, ""); }
+function onBase() { store("vera.base", base()); $("liveBanner").hidden = !base().includes("onrender.com"); health(); }
+baseEl.addEventListener("change", onBase);
+$("useLive").onclick = () => { baseEl.value = LIVE; onBase(); };
+$("useLocal").onclick = () => { baseEl.value = LOCAL; onBase(); };
+
+const theme = load("vera.theme"); if (theme) document.documentElement.dataset.theme = theme;
+$("themeBtn").onclick = () => {
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  const cur = document.documentElement.dataset.theme || (dark ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next; store("vera.theme", next);
+};
+
+async function api(method, path, body) {
+  const t0 = performance.now();
+  let status = 0, json = null, text = "";
+  try {
+    const res = await fetch(base() + path, { method, headers: body ? { "Content-Type": "application/json" } : {},
+                                             body: body ? JSON.stringify(body) : undefined });
+    status = res.status; text = await res.text();
+    try { json = JSON.parse(text); } catch (e) { json = null; }
+  } catch (e) {
+    text = String(e) + "\n\nIf this is the live bot: it may be waking up (wait ~30s), or the deployed version predates CORS.";
+  }
+  logCall(method, path, status, Math.round(performance.now() - t0), body, json ?? text);
+  return { status, json };
+}
+
+function logCall(method, path, status, ms, req, res) {
+  const d = document.createElement("details");
+  const s = document.createElement("summary");
+  s.innerHTML = `<span class="s${String(status)[0]}">${status || "ERR"}</span><span></span><span class="muted"></span>`;
+  s.children[1].textContent = `${method} ${path}`;
+  s.children[2].textContent = `${ms} ms`;
+  d.append(s);
+  if (req) { const p = document.createElement("pre"); p.textContent = "→ " + JSON.stringify(req, null, 2); d.append(p); }
+  const p2 = document.createElement("pre"); p2.textContent = "← " + (typeof res === "string" ? res : JSON.stringify(res, null, 2)); d.append(p2);
+  $("log").prepend(d);
+}
+$("clearLog").onclick = () => { $("log").innerHTML = ""; };
+
+async function health() {
+  const el = $("health");
+  try {
+    const r = await fetch(base() + "/v1/healthz"); const j = await r.json();
+    const c = j.contexts_loaded || {};
+    el.innerHTML = `<span class="dot ok"></span><span></span>`;
+    el.children[1].textContent = `up ${Math.floor(j.uptime_seconds / 60)}m · ${c.category||0}c ${c.merchant||0}m ${c.customer||0}cu ${c.trigger||0}t`;
+  } catch (e) { el.innerHTML = `<span class="dot bad"></span><span>unreachable</span>`; }
+}
+setInterval(() => { if (!document.hidden) health(); }, 20000);
+
+// ---- scenarios ------------------------------------------------------------
+DATA.scenarios.forEach((s, i) => { const o = document.createElement("option"); o.value = i; o.textContent = s.label; $("scenario").append(o); });
+function scen() { return DATA.scenarios[+$("scenario").value]; }
+function showInfo() {
+  const s = scen(), m = DATA.merchants[s.merchant_id];
+  $("scenarioInfo").textContent = `${m.identity.name} (${m.identity.locality}) · trigger: ${s.trigger.kind}` +
+    (s.customer_id ? ` · customer: ${DATA.customers[s.customer_id].identity.name}` : "");
+}
+$("scenario").onchange = showInfo; showInfo();
+
+$("pushBtn").onclick = async () => {
+  const s = scen(), acks = $("acks"); acks.innerHTML = "";
+  const pushes = [["category", s.category, DATA.categories[s.category]], ["merchant", s.merchant_id, DATA.merchants[s.merchant_id]]];
+  if (s.customer_id) pushes.push(["customer", s.customer_id, DATA.customers[s.customer_id]]);
+  pushes.push(["trigger", s.trigger.id, s.trigger]);
+  for (const [scope, id, payload] of pushes) {
+    const r = await api("POST", "/v1/context", { scope, context_id: id, version: 1, payload, delivered_at: new Date().toISOString() });
+    const d = document.createElement("div");
+    d.textContent = `${r.status === 200 ? "✓" : "✗"} ${scope}/${id} → ${r.status}${r.json && r.json.reason ? " " + r.json.reason : ""}`;
+    acks.append(d);
+  }
+  health();
+};
+
+$("tickBtn").onclick = async () => {
+  const s = scen();
+  const r = await api("POST", "/v1/tick", { now: new Date().toISOString(), available_triggers: [s.trigger.id] });
+  const actions = (r.json && r.json.actions) || [];
+  if (!actions.length) {
+    const d = document.createElement("div");
+    d.textContent = "Tick returned no actions — push the context first, or this trigger was already sent (suppression), or the merchant opted out. Teardown resets.";
+    $("acks").append(d); return;
+  }
+  for (const a of actions) {
+    convs[a.conversation_id] = { action: a, turn: 1, ended: false, items: [{ who: "vera", text: a.body, meta: `cta: ${a.cta} · ${a.send_as}` }] };
+    active = a.conversation_id;
+  }
+  renderList(); renderChat();
+};
+
+// ---- conversations --------------------------------------------------------
+const MERCHANT_CHIPS = ["Ok lets do it. Whats next?", "What is this about exactly?", "How much does it cost?", "Who are you? Is this a bot?",
+  "How did you get my number?", "Thank you for contacting us! Our team will respond shortly.", "I'm busy right now, call me later",
+  "Can you also help me file my GST?", "You people are useless", "Stop messaging me", "haan bhej do", "CONFIRM", "thanks!"];
+const CUSTOMER_CHIPS = ["Yes please, 1", "2", "Can I come at 7pm instead?", "What's the price?", "Who is this?", "No thanks", "STOP"];
+
+function renderList() {
+  const list = $("convlist"); list.innerHTML = "";
+  Object.entries(convs).forEach(([id, c]) => {
+    const b = document.createElement("button");
+    const m = DATA.merchants[c.action.merchant_id];
+    b.textContent = `${c.ended ? "🔚 " : ""}${c.action.customer_id ? "👤 " + c.action.customer_id.split("_")[1] + " · " : ""}${m ? m.identity.name : c.action.merchant_id} · ${c.action.trigger_id.replace(/^trg_\d+_/, "")}`;
+    if (id === active) b.classList.add("active");
+    b.onclick = () => { active = id; renderList(); renderChat(); };
+    list.append(b);
+  });
+}
+
+function renderChat() {
+  const chat = $("chat"); chat.innerHTML = "";
+  const c = convs[active];
+  if (!c) { chat.innerHTML = '<div class="empty">No conversation selected.</div>'; return; }
+  const isCustomer = !!c.action.customer_id;
+  $("convHeader").textContent = `${c.action.conversation_id} · replying as ${isCustomer ? "customer" : "merchant"} · turn ${c.turn}`;
+  for (const it of c.items) {
+    const d = document.createElement("div");
+    if (it.who === "sys") { d.className = "sys"; d.textContent = it.text; }
+    else {
+      d.className = "bubble " + (it.who === "vera" ? "vera" : "me"); d.textContent = it.text;
+      if (it.meta) { const m = document.createElement("span"); m.className = "meta"; m.textContent = it.meta; d.append(m); }
+    }
+    chat.append(d);
+  }
+  chat.scrollTop = chat.scrollHeight;
+  $("msg").disabled = $("sendBtn").disabled = c.ended;
+  $("msg").placeholder = c.ended ? "Conversation ended" : `Reply as the ${isCustomer ? "customer" : "merchant"}…`;
+  const chips = $("chips"); chips.innerHTML = "";
+  (isCustomer ? CUSTOMER_CHIPS : MERCHANT_CHIPS).forEach((t) => {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = t; b.disabled = c.ended;
+    b.onclick = () => reply(t); chips.append(b);
+  });
+}
+
+async function reply(text) {
+  const c = convs[active]; if (!c || c.ended || !text.trim()) return;
+  c.turn += 1;
+  c.items.push({ who: "me", text });
+  renderChat();
+  const a = c.action;
+  const r = await api("POST", "/v1/reply", { conversation_id: a.conversation_id, merchant_id: a.merchant_id, customer_id: a.customer_id,
+    from_role: a.customer_id ? "customer" : "merchant", message: text, received_at: new Date().toISOString(), turn_number: c.turn });
+  const j = r.json || {};
+  if (j.action === "send") { c.turn += 1; c.items.push({ who: "vera", text: j.body, meta: `cta: ${j.cta} · ${j.rationale || ""}` }); }
+  else if (j.action === "wait") c.items.push({ who: "sys", text: `⏸ Vera waits ${Math.round((j.wait_seconds || 0) / 60)} min — ${j.rationale || ""}` });
+  else if (j.action === "end") { c.ended = true; c.items.push({ who: "sys", text: `🔚 Conversation ended — ${j.rationale || ""}` }); }
+  else c.items.push({ who: "sys", text: `⚠ Unexpected response (${r.status})` });
+  renderList(); renderChat();
+}
+$("composer").onsubmit = (e) => { e.preventDefault(); const v = $("msg").value; $("msg").value = ""; reply(v); };
+
+// ---- bot controls ---------------------------------------------------------
+$("metaBtn").onclick = () => api("GET", "/v1/metadata");
+$("healthBtn").onclick = async () => { await api("GET", "/v1/healthz"); health(); };
+$("teardownBtn").onclick = async () => {
+  if (!confirm("Wipe ALL state on " + base() + "?")) return;
+  await api("POST", "/v1/teardown", {});
+  for (const k of Object.keys(convs)) delete convs[k];
+  active = null; $("acks").innerHTML = ""; renderList(); renderChat(); health();
+};
+$("cSend").onclick = async () => {
+  let body;
+  if ($("cMethod").value === "POST") {
+    try { body = JSON.parse($("cBody").value || "{}"); } catch (e) { alert("Body is not valid JSON: " + e.message); return; }
+  }
+  await api($("cMethod").value, $("cPath").value.trim(), body);
+};
+
+onBase();
+</script>
+</body>
+</html>

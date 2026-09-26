@@ -1,0 +1,1231 @@
+{
+  "info": {
+    "name": "Vera Bot — magicpin judge flow",
+    "description": "The judge harness lifecycle as runnable requests with test assertions: warmup, context contract, tick, replay scenarios, teardown. Pick the Local or Live environment, then Run collection.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "0 · Reset",
+      "item": [
+        {
+          "name": "Teardown (start clean)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('wiped', () => pm.expect(pm.response.json().wiped).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/teardown",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "teardown"
+              ]
+            },
+            "description": "Wipes all bot state so the run is repeatable. Against the LIVE bot this is fine before evaluation — never during it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1 · Warmup (judge phase 1)",
+      "item": [
+        {
+          "name": "GET /v1/healthz",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('responds well under the 30s judge timeout', () => pm.expect(pm.response.responseTime).to.be.below(3000));",
+                  "const j = pm.response.json();",
+                  "pm.test('status ok', () => pm.expect(j.status).to.eql('ok'));",
+                  "pm.test('contexts_loaded has all 4 scopes', () => pm.expect(j.contexts_loaded).to.have.all.keys('category','merchant','customer','trigger'));",
+                  "pm.test('starts empty', () => pm.expect(Object.values(j.contexts_loaded).reduce((a,b)=>a+b,0)).to.eql(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/healthz",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "healthz"
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /v1/metadata",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "['team_name','team_members','model','approach','contact_email','version','submitted_at'].forEach(k => pm.test('has ' + k, () => pm.expect(j).to.have.property(k)));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/metadata",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "metadata"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 · Context contract",
+      "item": [
+        {
+          "name": "Push category (dentists)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('accepted', () => pm.expect(j.accepted).to.eql(true));",
+                  "pm.test('ack_id format', () => pm.expect(j.ack_id).to.match(/^ack_.+_v\\d+$/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/context",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "context"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scope\": \"category\",\n  \"context_id\": \"dentists\",\n  \"version\": 1,\n  \"payload\": {\n    \"slug\": \"dentists\",\n    \"display_name\": \"Dentists\",\n    \"voice\": {\n      \"tone\": \"peer_clinical\",\n      \"register\": \"respectful_collegial\",\n      \"code_mix\": \"hindi_english_natural\",\n      \"vocab_allowed\": [\n        \"fluoride varnish\",\n        \"scaling\",\n        \"caries\",\n        \"occlusion\",\n        \"bruxism\",\n        \"endodontic\",\n        \"periodontal\",\n        \"implant\",\n        \"aligner\",\n        \"veneer\",\n        \"OPG\",\n        \"IOPA\",\n        \"RCT\",\n        \"CAD/CAM\",\n        \"zirconia\",\n        \"PFM\"\n      ],\n      \"vocab_taboo\": [\n        \"guaranteed\",\n        \"100% safe\",\n        \"completely cure\",\n        \"miracle\",\n        \"best in city\",\n        \"doctor approved\",\n        \"FDA-approved (use only when actually applicable)\"\n      ],\n      \"salutation_examples\": [\n        \"Dr. {first_name}\",\n        \"Doc\"\n      ],\n      \"tone_examples\": [\n        \"Worth a look — JIDA Oct 2026 p.14\",\n        \"This one likely affects your high-risk adult cohort\",\n        \"If your case-mix is mostly cosmetic, may not be relevant\"\n      ]\n    },\n    \"offer_catalog\": [\n      {\n        \"id\": \"den_001\",\n        \"title\": \"Dental Cleaning @ ₹299\",\n        \"value\": \"299\",\n        \"audience\": \"new_user\",\n        \"type\": \"service_at_price\"\n      },\n      {\n        \"id\": \"den_002\",\n        \"title\": \"Free Consultation\",\n        \"value\": \"0\",\n        \"audience\": \"new_user\",\n        \"type\": \"free_service\"\n      },\n      {\n        \"id\": \"den_003\",\n        \"title\": \"Teeth Whitening @ ₹1,499\",\n        \"value\": \"1499\",\n        \"audience\": \"new_user\",\n        \"type\": \"service_at_price\"\n      },\n      {\n        \"id\": \"den_004\",\n        \"title\": \"Root Canal @ ₹2,999 (single rooted)\",\n        \"value\": \"2999\",\n        \"audience\": \"new_user\",\n        \"type\": \"service_at_price\"\n      },\n      {\n        \"id\": \"den_005\",\n        \"title\": \"Free Smile Analysis + Digital Scan\",\n        \"value\": \"0\",\n        \"audience\": \"new_user\",\n        \"type\": \"free_service\"\n      },\n      {\n        \"id\": \"den_006\",\n        \"title\": \"Aligner Consultation @ ₹499\",\n        \"value\": \"499\",\n        \"audience\": \"new_user\",\n        \"type\": \"service_at_price\"\n      },\n      {\n        \"id\": \"den_007\",\n        \"title\": \"Pediatric Dental Checkup @ ₹199\",\n        \"value\": \"199\",\n        \"audience\": \"new_user\",\n        \"type\": \"service_at_price\"\n      },\n      {\n        \"id\": \"den_008\",\n        \"title\": \"Annual Family Dental Plan @ ₹4,999\",\n        \"value\": \"4999\",\n        \"audience\": \"repeat_user\",\n        \"type\": \"membership\"\n      }\n    ],\n    \"peer_stats\": {\n      \"scope\": \"metro_solo_practices_2026\",\n      \"avg_rating\": 4.4,\n      \"avg_review_count\": 62,\n      \"avg_views_30d\": 1820,\n      \"avg_calls_30d\": 12,\n      \"avg_directions_30d\": 38,\n      \"avg_ctr\": 0.03,\n      \"avg_photos\": 9,\n      \"avg_post_freq_days\": 14,\n      \"retention_6mo_pct\": 0.42\n    },\n    \"digest\": [\n      {\n        \"id\": \"d_2026W17_jida_fluoride\",\n        \"kind\": \"research\",\n        \"title\": \"3-month fluoride varnish recall outperforms 6-month for high-risk adult caries\",\n        \"source\": \"JIDA Oct 2026, p.14\",\n        \"trial_n\": 2100,\n        \"patient_segment\": \"high_risk_adults\",\n        \"summary\": \"Multi-center Indian trial shows 38% lower caries recurrence with 3-month vs 6-month recall in adults with active decay history. No effect in low-risk patients.\",\n        \"actionable\": \"Reassess recall interval for adults flagged high-risk in your charting\"\n      },\n      {\n        \"id\": \"d_2026W17_dci_radiograph\",\n        \"kind\": \"compliance\",\n        \"title\": \"DCI revised radiograph dose limits effective 2026-12-15\",\n        \"source\": \"Dental Council of India circular 2026-11-04\",\n        \"summary\": \"Maximum dose per IOPA exposure drops from 1.5 mSv to 1.0 mSv. E-speed film passes at the new limit; D-speed does not. Digital RVG sensors unaffected.\",\n        \"actionable\": \"Audit your X-ray setup before Dec 15; document E-speed or RVG in your SOPs\"\n      },\n      {\n        \"id\": \"d_2026W17_ida_webinar\",\n        \"kind\": \"cde\",\n        \"title\": \"IDA Delhi: Digital impressions — 2026 state of the art\",\n        \"source\": \"IDA Delhi chapter calendar\",\n        \"date\": \"2026-05-02T19:00:00+05:30\",\n        \"credits\": 2,\n        \"summary\": \"Speaker: Dr. R. Mehta. Covers Primescan 2, Trios 5, and CAD/CAM workflow ROI for solo practices.\",\n        \"actionable\": \"Free for IDA members; ₹500 for non-members\"\n      },\n      {\n        \"id\": \"d_2026W17_aligner_trend\",\n        \"kind\": \"trend\",\n        \"title\": \"Clear aligner consultations searches +62% YoY in metros\",\n        \"source\": \"Practo + Google Trends, Apr 2026\",\n        \"summary\": \"'Clear aligners near me' query growth concentrated in 28-45 age band; female-skewed. Pricing pressure as DIY aligner brands hit the market.\",\n        \"actionable\": \"Position your supervised-aligner offer against DIY in your GBP description\"\n      },\n      {\n        \"id\": \"d_2026W17_e_max_press\",\n        \"kind\": \"tech\",\n        \"title\": \"Dentsply launches IPS e.max Press for zirconia crowns in India at ₹3,200/unit (Delhi labs)\",\n        \"source\": \"Dentsply India launch note 2026-04-18\",\n        \"summary\": \"Better aesthetic, similar fracture resistance to standard zirconia. Two Delhi labs (Dental Direkt, Siam Dental) confirmed stocking. Shared-lease scanner deals available.\",\n        \"actionable\": \"Worth comparing if crown work is >15% of monthly revenue\"\n      }\n    ],\n    \"patient_content_library\": [\n      {\n        \"id\": \"pc_oral_heart\",\n        \"title\": \"3 things your teeth tell you about your heart\",\n        \"channel\": \"whatsapp\",\n        \"length_seconds\": 90,\n        \"body\": \"Periodontal disease shares inflammation pathways with cardiovascular disease. Bleeding gums, persistent bad breath, and loose teeth in middle age are early signals. A 2024 meta-analysis of 18 studies found periodontal patients had 22% higher CVD events. The simplest action: scaling every 6 months reduces both gum and inflammation markers.\"\n      },\n      {\n        \"id\": \"pc_kid_brushing\",\n        \"title\": \"Why your child resists brushing — and what to try this week\",\n        \"channel\": \"whatsapp\",\n        \"length_seconds\": 60,\n        \"body\": \"Most resistance under age 7 is sensory, not behavioural. Try: (1) a softer brush than you think necessary, (2) brushing in front of a mirror so they see what's happening, (3) two minutes of music as the timer. If resistance persists past 4 weeks, it's worth a pediatric dental consult.\"\n      },\n      {\n        \"id\": \"pc_aligner_vs_braces\",\n        \"title\": \"Aligners or braces? What I tell my patients in their 30s\",\n        \"channel\": \"whatsapp\",\n        \"length_seconds\": 75,\n        \"body\": \"Aligners work for ~70% of cases — mild-to-moderate crowding, spacing, and minor rotations. Braces still win for severe rotations, deep bites, and skeletal corrections. The tell: if you can't keep aligners on for 22 hours/day, braces are the safer choice.\"\n      }\n    ],\n    \"seasonal_beats\": [\n      {\n        \"month_range\": \"Nov-Feb\",\n        \"note\": \"exam-stress bruxism spike — ortho consults rise 30% in 18-24 cohort\"\n      },\n      {\n        \"month_range\": \"Oct-Dec\",\n        \"note\": \"wedding whitening peak — bookings 2x baseline; ladies' segment dominant\"\n      },\n      {\n        \"month_range\": \"Jan\",\n        \"note\": \"new-year resolution surge — annual check-up bookings +40%\"\n      },\n      {\n        \"month_range\": \"Apr-Jun\",\n        \"note\": \"school holiday window — pediatric appointments +50%\"\n      }\n    ],\n    \"trend_signals\": [\n      {\n        \"query\": \"clear aligners delhi\",\n        \"delta_yoy\": 0.62,\n        \"segment_age\": \"28-45\",\n        \"skew\": \"female\"\n      },\n      {\n        \"query\": \"teeth whitening price\",\n        \"delta_yoy\": 0.41,\n        \"segment_age\": \"all\",\n        \"skew\": \"balanced\"\n      },\n      {\n        \"query\": \"dental implants near me\",\n        \"delta_yoy\": 0.18,\n        \"segment_age\": \"45-65\",\n        \"skew\": \"male\"\n      },\n      {\n        \"query\": \"kids first dental visit\",\n        \"delta_yoy\": 0.27,\n        \"segment_age\": \"parents_25-40\",\n        \"skew\": \"female\"\n      }\n    ],\n    \"regulatory_authorities\": [\n      \"Dental Council of India (DCI)\",\n      \"Indian Dental Association (IDA)\"\n    ],\n    \"professional_journals\": [\n      \"JIDA\",\n      \"Indian Journal of Dental Research\",\n      \"Dental Tribune India\"\n    ]\n  },\n  \"delivered_at\": \"2026-04-26T10:00:00Z\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Push merchant (Dr. Meera)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('accepted', () => pm.expect(j.accepted).to.eql(true));",
+                  "pm.test('ack_id format', () => pm.expect(j.ack_id).to.match(/^ack_.+_v\\d+$/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/context",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "context"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scope\": \"merchant\",\n  \"context_id\": \"m_001_drmeera_dentist_delhi\",\n  \"version\": 1,\n  \"payload\": {\n    \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n    \"category_slug\": \"dentists\",\n    \"identity\": {\n      \"name\": \"Dr. Meera's Dental Clinic\",\n      \"city\": \"Delhi\",\n      \"locality\": \"Lajpat Nagar\",\n      \"place_id\": \"ChIJ_LAJPATNAGAR_DENTIST_001\",\n      \"verified\": true,\n      \"languages\": [\n        \"en\",\n        \"hi\"\n      ],\n      \"owner_first_name\": \"Meera\",\n      \"established_year\": 2018\n    },\n    \"subscription\": {\n      \"status\": \"active\",\n      \"plan\": \"Pro\",\n      \"days_remaining\": 82,\n      \"renewed_at\": \"2026-02-04\"\n    },\n    \"performance\": {\n      \"window_days\": 30,\n      \"views\": 2410,\n      \"calls\": 18,\n      \"directions\": 45,\n      \"ctr\": 0.021,\n      \"leads\": 9,\n      \"delta_7d\": {\n        \"views_pct\": 0.18,\n        \"calls_pct\": -0.05,\n        \"ctr_pct\": 0.02\n      }\n    },\n    \"offers\": [\n      {\n        \"id\": \"o_meera_001\",\n        \"title\": \"Dental Cleaning @ ₹299\",\n        \"status\": \"active\",\n        \"started\": \"2026-03-01\"\n      },\n      {\n        \"id\": \"o_meera_002\",\n        \"title\": \"Deep Cleaning @ ₹499\",\n        \"status\": \"expired\",\n        \"ended\": \"2026-02-28\"\n      }\n    ],\n    \"conversation_history\": [\n      {\n        \"ts\": \"2026-04-24T10:12:00Z\",\n        \"from\": \"vera\",\n        \"body\": \"Profile audit done — your photos are 8/10, description complete, but Google posts are stale (last post 22 days ago). Want me to draft 3 posts you can review?\",\n        \"engagement\": \"merchant_replied\"\n      },\n      {\n        \"ts\": \"2026-04-24T10:18:00Z\",\n        \"from\": \"merchant\",\n        \"body\": \"Yes please, focus on whitening and aligners\",\n        \"engagement\": \"intent_action\"\n      }\n    ],\n    \"customer_aggregate\": {\n      \"total_unique_ytd\": 540,\n      \"lapsed_180d_plus\": 78,\n      \"retention_6mo_pct\": 0.38,\n      \"high_risk_adult_count\": 124\n    },\n    \"signals\": [\n      \"stale_posts:22d\",\n      \"ctr_below_peer_median\",\n      \"high_risk_adult_cohort\",\n      \"engaged_in_last_48h\"\n    ],\n    \"review_themes\": [\n      {\n        \"theme\": \"wait_time\",\n        \"sentiment\": \"neg\",\n        \"occurrences_30d\": 3,\n        \"common_quote\": \"had to wait 30 min on Sunday afternoon\"\n      },\n      {\n        \"theme\": \"doctor_manner\",\n        \"sentiment\": \"pos\",\n        \"occurrences_30d\": 5,\n        \"common_quote\": \"Dr. Meera explains everything patiently\"\n      }\n    ]\n  },\n  \"delivered_at\": \"2026-04-26T10:00:00Z\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Push customer (Priya)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('accepted', () => pm.expect(j.accepted).to.eql(true));",
+                  "pm.test('ack_id format', () => pm.expect(j.ack_id).to.match(/^ack_.+_v\\d+$/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/context",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "context"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scope\": \"customer\",\n  \"context_id\": \"c_001_priya_for_m001\",\n  \"version\": 1,\n  \"payload\": {\n    \"customer_id\": \"c_001_priya_for_m001\",\n    \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n    \"identity\": {\n      \"name\": \"Priya\",\n      \"phone_redacted\": \"<phone>\",\n      \"language_pref\": \"hi-en mix\",\n      \"age_band\": \"25-35\"\n    },\n    \"relationship\": {\n      \"first_visit\": \"2025-11-04\",\n      \"last_visit\": \"2026-05-12\",\n      \"visits_total\": 4,\n      \"services_received\": [\n        \"cleaning\",\n        \"cleaning\",\n        \"whitening\",\n        \"cleaning\"\n      ],\n      \"lifetime_value\": 1696\n    },\n    \"state\": \"lapsed_soft\",\n    \"preferences\": {\n      \"preferred_slots\": \"weekday_evening\",\n      \"channel\": \"whatsapp\",\n      \"reminder_opt_in\": true\n    },\n    \"consent\": {\n      \"opted_in_at\": \"2025-11-04\",\n      \"scope\": [\n        \"recall_reminders\",\n        \"appointment_reminders\"\n      ]\n    }\n  },\n  \"delivered_at\": \"2026-04-26T10:00:00Z\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Push trigger (research digest)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('accepted', () => pm.expect(j.accepted).to.eql(true));",
+                  "pm.test('ack_id format', () => pm.expect(j.ack_id).to.match(/^ack_.+_v\\d+$/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/context",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "context"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scope\": \"trigger\",\n  \"context_id\": \"trg_001_research_digest_dentists\",\n  \"version\": 1,\n  \"payload\": {\n    \"id\": \"trg_001_research_digest_dentists\",\n    \"scope\": \"merchant\",\n    \"kind\": \"research_digest\",\n    \"source\": \"external\",\n    \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n    \"customer_id\": null,\n    \"payload\": {\n      \"category\": \"dentists\",\n      \"top_item_id\": \"d_2026W17_jida_fluoride\"\n    },\n    \"urgency\": 2,\n    \"suppression_key\": \"research:dentists:2026-W17\",\n    \"expires_at\": \"2026-05-03T00:00:00Z\"\n  },\n  \"delivered_at\": \"2026-04-26T10:00:00Z\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Push trigger (recall due)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('accepted', () => pm.expect(j.accepted).to.eql(true));",
+                  "pm.test('ack_id format', () => pm.expect(j.ack_id).to.match(/^ack_.+_v\\d+$/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/context",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "context"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scope\": \"trigger\",\n  \"context_id\": \"trg_003_recall_due_priya\",\n  \"version\": 1,\n  \"payload\": {\n    \"id\": \"trg_003_recall_due_priya\",\n    \"scope\": \"customer\",\n    \"kind\": \"recall_due\",\n    \"source\": \"internal\",\n    \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n    \"customer_id\": \"c_001_priya_for_m001\",\n    \"payload\": {\n      \"service_due\": \"6_month_cleaning\",\n      \"last_service_date\": \"2026-05-12\",\n      \"due_date\": \"2026-11-12\",\n      \"available_slots\": [\n        {\n          \"iso\": \"2026-11-05T18:00:00+05:30\",\n          \"label\": \"Wed 5 Nov, 6pm\"\n        },\n        {\n          \"iso\": \"2026-11-06T17:00:00+05:30\",\n          \"label\": \"Thu 6 Nov, 5pm\"\n        }\n      ]\n    },\n    \"urgency\": 3,\n    \"suppression_key\": \"recall:c_001_priya_for_m001:6mo\",\n    \"expires_at\": \"2026-11-30T00:00:00Z\"\n  },\n  \"delivered_at\": \"2026-04-26T10:00:00Z\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Same version again → idempotent no-op",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('accepted (no-op)', () => pm.expect(pm.response.json().accepted).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/context",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "context"
+              ]
+            },
+            "description": "Spec: re-posting the same version is a no-op. The payload must NOT change (the next tick still says Dr. Meera).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scope\": \"merchant\",\n  \"context_id\": \"m_001_drmeera_dentist_delhi\",\n  \"version\": 1,\n  \"payload\": {\n    \"identity\": {\n      \"name\": \"HIJACK\"\n    }\n  },\n  \"delivered_at\": \"2026-04-26T10:00:00Z\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Older version → 409 stale_version",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 409', () => pm.response.to.have.status(409));",
+                  "pm.test('reason stale_version', () => pm.expect(pm.response.json().reason).to.eql('stale_version'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/context",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "context"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scope\": \"merchant\",\n  \"context_id\": \"m_001_drmeera_dentist_delhi\",\n  \"version\": 0,\n  \"payload\": {\n    \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n    \"category_slug\": \"dentists\",\n    \"identity\": {\n      \"name\": \"Dr. Meera's Dental Clinic\",\n      \"city\": \"Delhi\",\n      \"locality\": \"Lajpat Nagar\",\n      \"place_id\": \"ChIJ_LAJPATNAGAR_DENTIST_001\",\n      \"verified\": true,\n      \"languages\": [\n        \"en\",\n        \"hi\"\n      ],\n      \"owner_first_name\": \"Meera\",\n      \"established_year\": 2018\n    },\n    \"subscription\": {\n      \"status\": \"active\",\n      \"plan\": \"Pro\",\n      \"days_remaining\": 82,\n      \"renewed_at\": \"2026-02-04\"\n    },\n    \"performance\": {\n      \"window_days\": 30,\n      \"views\": 2410,\n      \"calls\": 18,\n      \"directions\": 45,\n      \"ctr\": 0.021,\n      \"leads\": 9,\n      \"delta_7d\": {\n        \"views_pct\": 0.18,\n        \"calls_pct\": -0.05,\n        \"ctr_pct\": 0.02\n      }\n    },\n    \"offers\": [\n      {\n        \"id\": \"o_meera_001\",\n        \"title\": \"Dental Cleaning @ ₹299\",\n        \"status\": \"active\",\n        \"started\": \"2026-03-01\"\n      },\n      {\n        \"id\": \"o_meera_002\",\n        \"title\": \"Deep Cleaning @ ₹499\",\n        \"status\": \"expired\",\n        \"ended\": \"2026-02-28\"\n      }\n    ],\n    \"conversation_history\": [\n      {\n        \"ts\": \"2026-04-24T10:12:00Z\",\n        \"from\": \"vera\",\n        \"body\": \"Profile audit done — your photos are 8/10, description complete, but Google posts are stale (last post 22 days ago). Want me to draft 3 posts you can review?\",\n        \"engagement\": \"merchant_replied\"\n      },\n      {\n        \"ts\": \"2026-04-24T10:18:00Z\",\n        \"from\": \"merchant\",\n        \"body\": \"Yes please, focus on whitening and aligners\",\n        \"engagement\": \"intent_action\"\n      }\n    ],\n    \"customer_aggregate\": {\n      \"total_unique_ytd\": 540,\n      \"lapsed_180d_plus\": 78,\n      \"retention_6mo_pct\": 0.38,\n      \"high_risk_adult_count\": 124\n    },\n    \"signals\": [\n      \"stale_posts:22d\",\n      \"ctr_below_peer_median\",\n      \"high_risk_adult_cohort\",\n      \"engaged_in_last_48h\"\n    ],\n    \"review_themes\": [\n      {\n        \"theme\": \"wait_time\",\n        \"sentiment\": \"neg\",\n        \"occurrences_30d\": 3,\n        \"common_quote\": \"had to wait 30 min on Sunday afternoon\"\n      },\n      {\n        \"theme\": \"doctor_manner\",\n        \"sentiment\": \"pos\",\n        \"occurrences_30d\": 5,\n        \"common_quote\": \"Dr. Meera explains everything patiently\"\n      }\n    ]\n  },\n  \"delivered_at\": \"2026-04-26T10:00:00Z\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Invalid scope → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400', () => pm.response.to.have.status(400));",
+                  "pm.test('reason invalid_scope', () => pm.expect(pm.response.json().reason).to.eql('invalid_scope'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/context",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "context"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scope\": \"banana\",\n  \"context_id\": \"x\",\n  \"version\": 1,\n  \"payload\": {},\n  \"delivered_at\": \"2026-04-26T10:00:00Z\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Malformed JSON → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 400', () => pm.response.to.have.status(400));",
+                  "pm.test('accepted false', () => pm.expect(pm.response.json().accepted).to.eql(false));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/context",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "context"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"scope\": \"merchant\", broken",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3 · Tick (judge phase 2)",
+      "item": [
+        {
+          "name": "Tick → Vera composes the research digest",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('responds well under the 30s judge timeout', () => pm.expect(pm.response.responseTime).to.be.below(3000));",
+                  "const acts = pm.response.json().actions;",
+                  "pm.test('at most 20 actions', () => pm.expect(acts.length).to.be.at.most(20));",
+                  "pm.test('one action', () => pm.expect(acts.length).to.eql(1));",
+                  "const a = acts[0];",
+                  "['conversation_id','merchant_id','send_as','trigger_id','template_name','template_params','body','cta','suppression_key','rationale'].forEach(k => pm.test('action has ' + k, () => pm.expect(a).to.have.property(k)));",
+                  "pm.test('merchant-facing → send_as vera', () => pm.expect(a.send_as).to.eql('vera'));",
+                  "pm.test('cta is valid', () => pm.expect(['open_ended','binary','none']).to.include(a.cta));",
+                  "pm.test('grounded: cites the real source + number', () => { pm.expect(a.body).to.include('JIDA'); pm.expect(a.body).to.include('2,100'); });",
+                  "pm.test('same-version no-op kept the real name', () => pm.expect(a.body).to.include('Dr. Meera'));",
+                  "pm.collectionVariables.set('convId', a.conversation_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/tick",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "tick"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"now\": \"2026-04-26T10:30:00Z\",\n  \"available_triggers\": [\n    \"trg_001_research_digest_dentists\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Tick again → suppressed (no repeat send)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('responds well under the 30s judge timeout', () => pm.expect(pm.response.responseTime).to.be.below(3000));",
+                  "const acts = pm.response.json().actions;",
+                  "pm.test('at most 20 actions', () => pm.expect(acts.length).to.be.at.most(20));",
+                  "pm.test('suppression_key respected: nothing re-sent', () => pm.expect(acts.length).to.eql(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/tick",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "tick"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"now\": \"2026-04-26T10:35:00Z\",\n  \"available_triggers\": [\n    \"trg_001_research_digest_dentists\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Tick → customer recall (on merchant's behalf)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('responds well under the 30s judge timeout', () => pm.expect(pm.response.responseTime).to.be.below(3000));",
+                  "const acts = pm.response.json().actions;",
+                  "pm.test('at most 20 actions', () => pm.expect(acts.length).to.be.at.most(20));",
+                  "pm.test('one action', () => pm.expect(acts.length).to.eql(1));",
+                  "pm.test('customer-facing → merchant_on_behalf', () => pm.expect(acts[0].send_as).to.eql('merchant_on_behalf'));",
+                  "pm.test('uses the real slots', () => pm.expect(acts[0].body).to.include('Wed 5 Nov'));",
+                  "pm.collectionVariables.set('custConvId', acts[0].conversation_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/tick",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "tick"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"now\": \"2026-04-26T10:40:00Z\",\n  \"available_triggers\": [\n    \"trg_003_recall_due_priya\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4 · Replay scenarios (judge phase 4)",
+      "item": [
+        {
+          "name": "Question → grounded answer",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('responds well under the 30s judge timeout', () => pm.expect(pm.response.responseTime).to.be.below(3000));",
+                  "const j = pm.response.json();",
+                  "pm.test('action send', () => pm.expect(j.action).to.eql('send'));",
+                  "pm.test('non-empty body', () => pm.expect(j.body).to.be.a('string').and.not.empty);",
+                  "pm.test('answers with the actual finding', () => pm.expect(j.body).to.include('38%'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/reply",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "reply"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"{{convId}}\",\n  \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n  \"customer_id\": null,\n  \"from_role\": \"merchant\",\n  \"message\": \"What exactly did the study find?\",\n  \"received_at\": \"2026-04-26T10:45:00Z\",\n  \"turn_number\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Intent transition: 'let's do it' → action, no re-qualifying",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('responds well under the 30s judge timeout', () => pm.expect(pm.response.responseTime).to.be.below(3000));",
+                  "const j = pm.response.json();",
+                  "pm.test('action send', () => pm.expect(j.action).to.eql('send'));",
+                  "pm.test('non-empty body', () => pm.expect(j.body).to.be.a('string').and.not.empty);",
+                  "pm.test('no qualifying questions', () => ['would you','do you','can you tell','what if','how about'].forEach(q => pm.expect(j.body.toLowerCase()).to.not.include(q)));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/reply",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "reply"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"{{convId}}\",\n  \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n  \"customer_id\": null,\n  \"from_role\": \"merchant\",\n  \"message\": \"Ok lets do it. Whats next?\",\n  \"received_at\": \"2026-04-26T10:45:00Z\",\n  \"turn_number\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "CONFIRM → executed",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('responds well under the 30s judge timeout', () => pm.expect(pm.response.responseTime).to.be.below(3000));",
+                  "const j = pm.response.json();",
+                  "pm.test('action send', () => pm.expect(j.action).to.eql('send'));",
+                  "pm.test('non-empty body', () => pm.expect(j.body).to.be.a('string').and.not.empty);",
+                  "pm.test('says it is live', () => pm.expect(j.body.toLowerCase()).to.include('live'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/reply",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "reply"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"{{convId}}\",\n  \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n  \"customer_id\": null,\n  \"from_role\": \"merchant\",\n  \"message\": \"CONFIRM\",\n  \"received_at\": \"2026-04-26T10:45:00Z\",\n  \"turn_number\": 4\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Auto-reply #1 → one nudge",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('responds well under the 30s judge timeout', () => pm.expect(pm.response.responseTime).to.be.below(3000));",
+                  "const j = pm.response.json();",
+                  "pm.test('action send', () => pm.expect(j.action).to.eql('send'));",
+                  "pm.test('non-empty body', () => pm.expect(j.body).to.be.a('string').and.not.empty);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/reply",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "reply"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"pm_auto\",\n  \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n  \"customer_id\": null,\n  \"from_role\": \"merchant\",\n  \"message\": \"Thank you for contacting us! Our team will respond shortly.\",\n  \"received_at\": \"2026-04-26T10:45:00Z\",\n  \"turn_number\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Auto-reply #2 → wait 24h",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('action wait', () => pm.expect(j.action).to.eql('wait'));",
+                  "pm.test('wait_seconds 86400', () => pm.expect(j.wait_seconds).to.eql(86400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/reply",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "reply"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"pm_auto\",\n  \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n  \"customer_id\": null,\n  \"from_role\": \"merchant\",\n  \"message\": \"Thank you for contacting us! Our team will respond shortly.\",\n  \"received_at\": \"2026-04-26T10:45:00Z\",\n  \"turn_number\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Auto-reply #3 → graceful end",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('action end', () => pm.expect(pm.response.json().action).to.eql('end'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/reply",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "reply"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"pm_auto\",\n  \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n  \"customer_id\": null,\n  \"from_role\": \"merchant\",\n  \"message\": \"Thank you for contacting us! Our team will respond shortly.\",\n  \"received_at\": \"2026-04-26T10:45:00Z\",\n  \"turn_number\": 4\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Off-topic (GST) → polite decline, back on mission",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('responds well under the 30s judge timeout', () => pm.expect(pm.response.responseTime).to.be.below(3000));",
+                  "const j = pm.response.json();",
+                  "pm.test('action send', () => pm.expect(j.action).to.eql('send'));",
+                  "pm.test('non-empty body', () => pm.expect(j.body).to.be.a('string').and.not.empty);",
+                  "pm.test('points to a CA', () => pm.expect(j.body).to.include('CA'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/reply",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "reply"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"pm_gst\",\n  \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n  \"customer_id\": null,\n  \"from_role\": \"merchant\",\n  \"message\": \"Can you also help me file my GST?\",\n  \"received_at\": \"2026-04-26T10:45:00Z\",\n  \"turn_number\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Busy → wait 30 min",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('action wait', () => pm.expect(j.action).to.eql('wait'));",
+                  "pm.test('wait_seconds 1800', () => pm.expect(j.wait_seconds).to.eql(1800));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/reply",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "reply"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"pm_busy\",\n  \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n  \"customer_id\": null,\n  \"from_role\": \"merchant\",\n  \"message\": \"I'm busy right now, in a meeting\",\n  \"received_at\": \"2026-04-26T10:45:00Z\",\n  \"turn_number\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Hostile opt-out → end",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('action end', () => pm.expect(pm.response.json().action).to.eql('end'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/reply",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "reply"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"pm_stop\",\n  \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n  \"customer_id\": null,\n  \"from_role\": \"merchant\",\n  \"message\": \"Stop messaging me. This is useless spam.\",\n  \"received_at\": \"2026-04-26T10:45:00Z\",\n  \"turn_number\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Customer books slot 1 → confirmation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('responds well under the 30s judge timeout', () => pm.expect(pm.response.responseTime).to.be.below(3000));",
+                  "const j = pm.response.json();",
+                  "pm.test('action send', () => pm.expect(j.action).to.eql('send'));",
+                  "pm.test('non-empty body', () => pm.expect(j.body).to.be.a('string').and.not.empty);",
+                  "pm.test('booked the real slot', () => { pm.expect(j.body).to.include('Booked'); pm.expect(j.body).to.include('Wed 5 Nov'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/reply",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "reply"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"{{custConvId}}\",\n  \"merchant_id\": \"m_001_drmeera_dentist_delhi\",\n  \"customer_id\": \"c_001_priya_for_m001\",\n  \"from_role\": \"customer\",\n  \"message\": \"Yes please, 1\",\n  \"received_at\": \"2026-04-26T10:45:00Z\",\n  \"turn_number\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5 · Teardown",
+      "item": [
+        {
+          "name": "Teardown → wipe",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('wiped', () => pm.expect(pm.response.json().wiped).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/teardown",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "teardown"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Healthz after teardown → all zeros",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('empty again', () => pm.expect(Object.values(pm.response.json().contexts_loaded).reduce((a,b)=>a+b,0)).to.eql(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/healthz",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "healthz"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "convId",
+      "value": ""
+    },
+    {
+      "key": "custConvId",
+      "value": ""
+    }
+  ]
+}

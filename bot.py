@@ -23,16 +23,20 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from composer import compose, parse_dt  # noqa: F401  (compose re-exported)
 from conversation_handlers import ConversationState, respond
 
 
-app = FastAPI(title="magicpin Vera Bot", version="2.1.1",
+app = FastAPI(title="magicpin Vera Bot", version="2.1.2",
               description="Pick an endpoint -> **Try it out** -> choose an example from the dropdown -> **Execute**.")
 log = logging.getLogger("vera")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+# Browser clients (tester/index.html, Swagger from another origin) need CORS; the judge and Postman don't.
+# Public, credential-free API, so any origin may call it.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
 START_TIME = time.time()
 
 VALID_SCOPES = ("category", "merchant", "customer", "trigger")
@@ -377,6 +381,15 @@ async def root():
             "endpoints": ["GET /v1/healthz", "GET /v1/metadata", "POST /v1/context", "POST /v1/tick", "POST /v1/reply"]}
 
 
+@app.get("/tester", include_in_schema=False)
+async def tester():
+    """Browser test console (tester/index.html) served same-origin, so it works on any device without CORS setup."""
+    page = Path(__file__).parent / "tester" / "index.html"
+    if not page.is_file():
+        return JSONResponse({"detail": "tester not built; run python tester/build.py"}, status_code=404)
+    return FileResponse(page, media_type="text/html")
+
+
 @app.get("/v1/healthz")
 @app.get("/healthz", include_in_schema=False)
 async def healthz():
@@ -396,7 +409,7 @@ async def metadata():
         "approach": "trigger-kind dispatch over 4 context layers; every fact sourced from pushed context; "
                     "suppression + per-merchant dedup on tick; intent-classified multi-turn replies",
         "contact_email": "nirvan.jha.ug23@nsut.ac.in",
-        "version": "2.1.1",
+        "version": "2.1.2",
         "submitted_at": "2026-04-26T08:00:00Z",
     }
 

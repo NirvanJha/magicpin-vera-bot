@@ -35,7 +35,8 @@ It never returns a 500, and every trigger is processed in isolation.
 
 ```bash
 pip install -r requirements.txt && uvicorn bot:app --port 8080
-python tests/run_all.py            # boots its own bot, runs every suite below
+python tests/run_all.py            # boots its own bot, runs every test suite
+# manual: open http://127.0.0.1:8080/tester  ·  Postman: postman/Vera.postman_collection.json
 ```
 
 The suites cover the §7 contract, the full judge lifecycle (48 checks), a seeded simulated-judge soak with 8 merchant personas, a structural fuzzer, restart and teardown, and intent accuracy. CI runs all of them on each push, on bare Python and against the Docker image. Details are in [`docs/DESIGN.md`](docs/DESIGN.md#tests).

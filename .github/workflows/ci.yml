@@ -21,6 +21,13 @@ jobs:
       # 10-seed simulated-judge soak, 3-seed fuzz, replay smoke test, restart + teardown
       - name: All suites
         run: python tests/run_all.py
+      - name: Postman collection (27 requests, 109 assertions) via the zero-dependency runner
+        run: |
+          uvicorn bot:app --port 8080 > postman_bot.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8080/v1/healthz && break; sleep 1; done
+          node postman/run.js http://127.0.0.1:8080
+      - name: Tester page is served
+        run: curl -sf http://127.0.0.1:8080/tester | grep -q "Vera Test Console"
 
   docker:
     runs-on: ubuntu-latest

@@ -100,6 +100,12 @@ uvicorn bot:app --port 8080
 
 **Official judge.** [`judge_simulator.py`](../judge_simulator.py) is byte-identical to the challenge copy. With a local LLM (`LLM_PROVIDER="ollama"`, `gemma3`) it gave each of 19 messages 41–45/50 (average 80%), and passed all 4 of its `all` scenarios. On Windows, run it with `PYTHONUTF8=1`.
 
+## Manual testing
+
+**Browser console.** `GET /tester` serves [`tester/index.html`](../tester/index.html), a WhatsApp-style console with 10 real scenarios from the dataset. You push a scenario, run a tick, then reply as the merchant or customer using free text or one-click adversarial replies (auto-reply, STOP, GST, Hinglish…). An inspector shows every raw request and response, and there's a Teardown button. It's same-origin when served by the bot. The file also works standalone, because the API sends CORS headers. Rebuild it with `python tester/build.py`.
+
+**Postman.** Import [`postman/Vera.postman_collection.json`](../postman/Vera.postman_collection.json) plus the `Local` or `Live` environment, then **Run collection**. That's 27 requests across the judge's phases (reset, warmup, context contract, tick, replay, teardown) with 109 test assertions. They pass `conversation_id` between requests via collection variables. Without Postman, run `node postman/run.js <baseUrl>`, a zero-dependency runner that executes the same test scripts. CI runs it on each push.
+
 ## Deploy
 
 A single always-on instance with one worker. All state lives in the process and, if `VERA_STATE_FILE` is set, in a snapshot. Don't run multiple workers or replicas, and don't redeploy during a test window.
