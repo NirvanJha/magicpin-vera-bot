@@ -29,7 +29,8 @@ from composer import compose, parse_dt  # noqa: F401  (compose re-exported)
 from conversation_handlers import ConversationState, respond
 
 
-app = FastAPI(title="magicpin Vera Bot", version="2.1.0")
+app = FastAPI(title="magicpin Vera Bot", version="2.1.1",
+              description="Pick an endpoint -> **Try it out** -> choose an example from the dropdown -> **Execute**.")
 log = logging.getLogger("vera")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 START_TIME = time.time()
@@ -303,6 +304,73 @@ def bad_request(reason: str, details: str = "", code: int = 400) -> JSONResponse
 # ENDPOINTS
 # =============================================================================
 
+# ---- /docs: request bodies + ready-to-run examples (documentation only; parsing is unchanged) ----
+def _body_doc(schema: dict, examples: dict) -> dict:
+    return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema, "examples": examples}}}}
+
+
+_MERCHANT_EXAMPLE = {
+    "merchant_id": "m_001_drmeera_dentist_delhi", "category_slug": "dentists",
+    "identity": {"name": "Dr. Meera's Dental Clinic", "city": "Delhi", "locality": "Lajpat Nagar",
+                 "languages": ["en", "hi"], "owner_first_name": "Meera"},
+    "performance": {"window_days": 30, "views": 2410, "calls": 18, "directions": 45, "ctr": 0.021,
+                    "delta_7d": {"views_pct": 0.18, "calls_pct": -0.05}},
+    "offers": [{"title": "Dental Cleaning @ ₹299", "status": "active"}],
+    "signals": ["stale_posts:22d", "ctr_below_peer_median", "high_risk_adult_cohort"],
+}
+_TRIGGER_EXAMPLE = {
+    "id": "trg_demo_competitor", "scope": "merchant", "kind": "competitor_opened",
+    "merchant_id": "m_001_drmeera_dentist_delhi", "customer_id": None,
+    "payload": {"competitor_name": "Smile Studio", "distance_km": 1.3, "their_offer": "Dental Cleaning @ ₹199",
+                "opened_date": "2026-04-08"},
+    "urgency": 3, "suppression_key": "competitor:demo", "expires_at": "2026-12-31T00:00:00Z",
+}
+CONTEXT_DOC = _body_doc(
+    {"type": "object", "required": ["scope", "context_id", "version", "payload"],
+     "properties": {"scope": {"type": "string", "enum": ["category", "merchant", "customer", "trigger"]},
+                    "context_id": {"type": "string"}, "version": {"type": "integer"},
+                    "payload": {"type": "object"}, "delivered_at": {"type": "string"}}},
+    {"1_merchant": {"summary": "1. Push a merchant (Dr. Meera)",
+                    "value": {"scope": "merchant", "context_id": "m_001_drmeera_dentist_delhi", "version": 1,
+                              "payload": _MERCHANT_EXAMPLE, "delivered_at": "2026-04-26T10:00:00Z"}},
+     "2_trigger": {"summary": "2. Push a trigger for her (competitor opened)",
+                   "value": {"scope": "trigger", "context_id": "trg_demo_competitor", "version": 1,
+                             "payload": _TRIGGER_EXAMPLE}},
+     "stale": {"summary": "Older version -> 409 stale_version (run after example 1)",
+               "value": {"scope": "merchant", "context_id": "m_001_drmeera_dentist_delhi", "version": 0, "payload": {}}},
+     "bad_scope": {"summary": "Invalid scope -> 400", "value": {"scope": "banana", "context_id": "x", "version": 1, "payload": {}}}})
+TICK_DOC = _body_doc(
+    {"type": "object", "required": ["now", "available_triggers"],
+     "properties": {"now": {"type": "string"}, "available_triggers": {"type": "array", "items": {"type": "string"}}}},
+    {"pushed": {"summary": "Tick with the trigger you pushed via /v1/context",
+                "value": {"now": "2026-04-26T10:30:00Z", "available_triggers": ["trg_demo_competitor"]}},
+     "seed": {"summary": "Tick with triggers from the bundled dataset (works on a fresh bot)",
+              "value": {"now": "2026-04-26T10:30:00Z",
+                        "available_triggers": ["trg_001_research_digest_dentists", "trg_003_recall_due_priya",
+                                               "trg_013_corporate_thali_planning"]}},
+     "empty": {"summary": "Nothing active -> {\"actions\": []}", "value": {"now": "2026-04-26T10:30:00Z", "available_triggers": []}}})
+REPLY_DOC = _body_doc(
+    {"type": "object", "required": ["conversation_id", "message"],
+     "properties": {"conversation_id": {"type": "string"}, "merchant_id": {"type": "string"},
+                    "customer_id": {"type": "string", "nullable": True},
+                    "from_role": {"type": "string", "enum": ["merchant", "customer"]},
+                    "message": {"type": "string"}, "received_at": {"type": "string"}, "turn_number": {"type": "integer"}}},
+    {k: {"summary": summary, "value": {"conversation_id": f"docs_{k}", "merchant_id": "m_001_drmeera_dentist_delhi",
+                                       "customer_id": None, "from_role": "merchant", "message": msg,
+                                       "received_at": "2026-04-26T10:45:00Z", "turn_number": 2}}
+     for k, summary, msg in [
+         ("commit", "Intent transition: 'ok let's do it' -> action", "Ok lets do it. Whats next?"),
+         ("question", "Question -> grounded answer", "What is this about exactly?"),
+         ("identity", "'Who are you?' -> honest identity", "Who are you? Is this a bot?"),
+         ("auto_reply", "Canned auto-reply (send 3x with the same conversation_id: send -> wait -> end)",
+          "Thank you for contacting us! Our team will respond shortly."),
+         ("stop", "Opt-out -> end", "Stop messaging me. This is useless spam."),
+         ("gst", "Off-topic -> polite decline, back on mission", "Can you also help me file my GST?"),
+         ("busy", "Busy -> wait 30 min", "I'm busy right now, in a meeting"),
+         ("hindi", "Hinglish commitment", "haan bhej do"),
+     ]})
+
+
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "magicpin-vera-bot",
@@ -310,7 +378,7 @@ async def root():
 
 
 @app.get("/v1/healthz")
-@app.get("/healthz")
+@app.get("/healthz", include_in_schema=False)
 async def healthz():
     counts = {s: 0 for s in VALID_SCOPES}
     for (scope, _) in list(contexts):
@@ -319,7 +387,7 @@ async def healthz():
 
 
 @app.get("/v1/metadata")
-@app.get("/metadata")
+@app.get("/metadata", include_in_schema=False)
 async def metadata():
     return {
         "team_name": "magicpin-ai-mastery",
@@ -328,13 +396,13 @@ async def metadata():
         "approach": "trigger-kind dispatch over 4 context layers; every fact sourced from pushed context; "
                     "suppression + per-merchant dedup on tick; intent-classified multi-turn replies",
         "contact_email": "nirvan.jha.ug23@nsut.ac.in",
-        "version": "2.1.0",
+        "version": "2.1.1",
         "submitted_at": "2026-04-26T08:00:00Z",
     }
 
 
-@app.post("/v1/context")
-@app.post("/context")
+@app.post("/v1/context", openapi_extra=CONTEXT_DOC)
+@app.post("/context", include_in_schema=False)
 async def push_context(request: Request):
     data, err = await read_json(request)
     if err:
@@ -365,7 +433,7 @@ async def push_context(request: Request):
 
 
 @app.post("/v1/teardown")
-@app.post("/teardown")
+@app.post("/teardown", include_in_schema=False)
 async def teardown():
     """End of test (testing brief §11): wipe every context, conversation and the on-disk snapshot."""
     with _state_lock:
@@ -384,8 +452,8 @@ async def teardown():
     return {"status": "ok", "wiped": True}
 
 
-@app.post("/v1/tick")
-@app.post("/tick")
+@app.post("/v1/tick", openapi_extra=TICK_DOC)
+@app.post("/tick", include_in_schema=False)
 async def tick(request: Request):
     data, err = await read_json(request)
     if err:
@@ -508,8 +576,8 @@ def _run_tick(data: dict) -> List[dict]:
     return actions
 
 
-@app.post("/v1/reply")
-@app.post("/reply")
+@app.post("/v1/reply", openapi_extra=REPLY_DOC)
+@app.post("/reply", include_in_schema=False)
 async def handle_reply(request: Request):
     data, err = await read_json(request)
     if err:
