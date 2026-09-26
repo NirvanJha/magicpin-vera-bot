@@ -287,6 +287,11 @@ class Ctx:
             return f"Main {noun} bhej doon? Reply YES."
         return f"Want me to send {noun}? Reply YES."
 
+    def yes(self, question_en: str, question_hi: Optional[str] = None) -> str:
+        """The single CTA: one yes/no question, always the last sentence. Hinglish when the merchant speaks Hindi."""
+        q = question_hi if (self.hi and question_hi) else question_en
+        return f"{q.strip().rstrip('?')}? Reply YES."
+
     # ---- customer-facing helpers -------------------------------------------
     def c_ident(self) -> dict:
         return _d(_d(self.customer).get("identity"))
@@ -354,24 +359,38 @@ def _res(body: str, cta: str, rationale: str, send_as: str = "vera",
 # MERCHANT-FACING COMPOSERS (send_as = vera)
 # =============================================================================
 
+def _no_dot(s: str) -> str:
+    return s.rstrip(" .")
+
+
+def _offer_or_catalog(c: Ctx) -> Tuple[Optional[str], bool]:
+    """(offer title, is_merchants_own). Falls back to the category's most common offer, framed as a proposal."""
+    offers = c.active_offers()
+    if offers:
+        return offers[0], True
+    return c.catalog_offer(), False
+
+
 def m_research(c: Ctx) -> dict:
     item = c.digest(c.payload.get("top_item_id") or c.payload.get("digest_item_id"),
                     ("research", "trend", "tech"))
     if not item:
         return m_generic(c)
     title, source = item.get("title", ""), item.get("source", "")
+    finding = _no_dot(first_sentence(item.get("summary")) or title)
     trial = fmt_int(item.get("trial_n"))
-    trial_s = f"{trial}-{c.audience()} trial:" if trial else ""
+    if trial and trial not in finding and str(item.get("trial_n")) not in finding:
+        finding += f" ({trial} {c.audience()}s)"
     tie = ""
     if item.get("patient_segment") == "high_risk_adults" and "high_risk_adult_cohort" in c.signals:
-        tie = "Directly relevant to your high-risk adult cohort."
+        tie = "Your high-risk adult cohort is exactly who this is for."
     elif item.get("patient_segment"):
         tie = f"Most relevant for {human(item.get('patient_segment'))}."
-    head = f"{c.sal()}, new in {source}:" if source else f"{c.sal()}, new digest item:"
-    body = join(head, f"{title}.", trial_s, first_sentence(item.get("summary")), tie,
-                c.ask(f"the 2-min abstract + a {c.audience()}-ed WhatsApp draft you can forward"))
+    head = f"{c.sal()}, new in {source}: {finding}." if source else f"{c.sal()}, {finding}."
+    body = join(head, tie, c.yes(f"Shall I send the 2-min abstract + a {c.audience()} WhatsApp you can forward",
+                                 f"2-min abstract + {c.audience()} WhatsApp draft bhej doon"))
     return _res(body, "binary",
-                f"Digest item {item.get('id')} ({source}) matched to merchant; cites source + numbers, reciprocity CTA.",
+                f"Digest item {item.get('id')} ({source}): leads with the finding + sample size, ties it to the merchant's cohort, reciprocity CTA.",
                 params=[c.sal(), title, source])
 
 
@@ -379,25 +398,22 @@ def m_compliance(c: Ctx) -> dict:
     item = c.digest(c.payload.get("top_item_id") or c.payload.get("digest_item_id"), ("compliance", "alert"))
     deadline = parse_dt(c.payload.get("deadline_iso") or _d(item).get("deadline_iso"))
     days_left = (deadline - c.now).days if (deadline and c.now) else None
+    when = ""
+    if deadline:
+        when = f"Deadline {fmt_date(deadline)} {deadline.year}" + (f" — {days_left} days left." if days_left and days_left > 0 else ".")
     if not item:
         if not deadline:
             return m_generic(c)
-        body = join(f"{c.sal()}, compliance deadline on {fmt_date(deadline)}"
-                    + (f" — {days_left} days left." if days_left and days_left > 0 else "."),
-                    c.ask("a 1-page audit checklist"))
-        return _res(body, "binary", "Compliance deadline from trigger payload.", params=[c.sal()])
-    title = item.get("title", "")
-    when = ""
-    if deadline and fmt_date(deadline) not in title and deadline.strftime("%Y-%m-%d") not in title:
-        when = f"Deadline: {fmt_date(deadline)} {deadline.year}."
-    if days_left is not None and days_left > 0:
-        when = join(when, f"That's {days_left} days from today.")
-    src = f"({item.get('source')})" if item.get("source") else ""
-    body = join(f"{c.sal()}, compliance heads-up {src}: {title}.", first_sentence(item.get("summary")), when,
-                first_sentence(item.get("actionable")),
-                c.ask("a 1-page audit checklist for your setup"))
-    return _res(body, "binary", f"Regulatory item {item.get('id')} with deadline; loss-aversion + effort externalization.",
-                params=[c.sal(), title])
+        body = join(f"{c.sal()}, a compliance change applies to you.", when,
+                    c.yes("Shall I send a 1-page checklist to get compliant in time", "1-page compliance checklist bhej doon"))
+        return _res(body, "binary", "Compliance deadline from trigger payload; loss aversion.", params=[c.sal()])
+    source = item.get("source")
+    finding = _no_dot(first_sentence(item.get("summary")) or item.get("title", ""))
+    head = f"{c.sal()}, {source}: {finding}." if source else f"{c.sal()}, {item.get('title', '')}: {finding}."
+    body = join(head, when, c.yes("Shall I send a 1-page checklist to audit your setup before then",
+                                  "Deadline se pehle audit ke liye 1-page checklist bhej doon"))
+    return _res(body, "binary", f"Regulatory item {item.get('id')}: concrete rule change + countdown (loss aversion), effortless CTA.",
+                params=[c.sal(), item.get("title", "")])
 
 
 def m_cde(c: Ctx) -> dict:
@@ -406,63 +422,78 @@ def m_cde(c: Ctx) -> dict:
         return m_generic(c)
     credits = c.payload.get("credits") or item.get("credits")
     dt = parse_dt(item.get("date"))
-    when = ""
-    if dt:
-        when = fmt_date(dt) + (f", {dt.strftime('%I%p').lstrip('0').lower()}" if dt.hour else "")
+    when = fmt_date(dt) + (f", {dt.strftime('%I%p').lstrip('0').lower()}" if dt and dt.hour else "") if dt else ""
     meta = ", ".join(x for x in [when, f"{credits} CDE credits" if credits else ""] if x)
-    body = join(f"{c.sal()}, {item.get('title', '')}" + (f" — {meta}." if meta else "."),
-                first_sentence(item.get("summary")), first_sentence(item.get("actionable")),
-                c.ask("the registration link"))
-    return _res(body, "binary", f"CDE opportunity {item.get('id')} with date/credits/fee from digest.",
+    fee = _no_dot(first_sentence(item.get("actionable")))
+    head = f"{c.sal()}, {item.get('title', '')}" + (f" — {meta}." if meta else ".")
+    body = join(head, f"{_no_dot(first_sentence(item.get('summary')))}." if item.get("summary") else "",
+                f"{fee}." if fee else "", c.yes("Shall I send the registration link", "Registration link bhej doon"))
+    return _res(body, "binary", f"CDE opportunity {item.get('id')}: date, credits and fee straight from the digest.",
                 params=[c.sal(), item.get("title", "")])
 
 
 def _metric_delta(c: Ctx) -> Tuple[str, Optional[float]]:
-    metric = c.payload.get("metric") or "views"
+    metric = c.payload.get("metric") if isinstance(c.payload.get("metric"), str) else "views"
     delta = _num(c.payload.get("delta_pct"))
     if delta is None:
         delta = _num(_d(c.perf.get("delta_7d")).get(f"{metric}_pct"))
     return metric, delta
 
 
+def _peer_gap(c: Ctx) -> str:
+    """Short social-proof clause: CTR vs peers, else views vs peers."""
+    ctr, avg = _num(c.perf.get("ctr")), _num(c.peer.get("avg_ctr"))
+    if ctr is not None and avg and ctr < avg:
+        return f"your CTR is {ctr:.1%} vs {avg:.1%} for {c.peer_scope() or 'peers'}"
+    views, avgv = _num(c.perf.get("views")), _num(c.peer.get("avg_views_30d"))
+    if views is not None and avgv and views < avgv * 0.9:
+        return f"you're at {int(views):,} views a month vs {int(avgv):,} for {c.peer_scope() or 'peers'}"
+    return ""
+
+
 def m_perf_dip(c: Ctx) -> dict:
     metric, delta = _metric_delta(c)
     p = pct(delta)
-    window = c.payload.get("window") or "7d"
     base = fmt_int(c.payload.get("vs_baseline"))
-    head = f"{c.sal()}, your {human(metric)} dropped {p}% in the last {window.replace('d', ' days')}" if p \
-        else f"{c.sal()}, your {human(metric)} are trending down this week"
-    head += f" (baseline {base}/week)." if base else "."
+    head = f"{c.sal()}, your {human(metric)} are down {p}% this week" if p else f"{c.sal()}, your {human(metric)} are slipping this week"
+    head += f" (usually {base}/week)." if base else "."
+    facts = join(c.perf_line(), f"{_peer_gap(c)[0].upper() + _peer_gap(c)[1:]}." if _peer_gap(c) else "")
     stale = c.stale_posts_days()
-    avg_freq = fmt_int(c.peer.get("avg_post_freq_days"))
-    stale_s = f"Your last Google post was {stale} days ago; peers post every {avg_freq} days." if (stale and avg_freq) else ""
-    offers = c.active_offers()
-    lever = f"Re-pushing '{offers[0]}' in a fresh post is the fastest lever." if offers else (
-        f"You have no active offer — '{c.catalog_offer()}' is the most common one in your category." if c.catalog_offer() else "")
-    body = join(head, c.perf_line(), c.peer_line(), stale_s, lever, c.ask("2 ready-to-publish Google posts"))
-    return _res(body, "binary", f"Performance dip on {metric} ({p}%) anchored on merchant numbers + peer benchmark.",
-                params=[c.sal(), f"{p}%"])
+    why = (f"Your last Google post was {stale} days ago — fresh posts are the quickest way to get found again." if stale
+           else "No stress — this is fixable with a visibility push.")
+    offer, own = _offer_or_catalog(c)
+    if offer and own:
+        cta = c.yes(f"Shall I put '{offer}' back in front of searchers with a fresh post today, so the {_outcome(c)} pick up again",
+                    f"Aaj hi '{offer}' ka fresh post live kar doon, taaki {_outcome(c)} phir se badhein")
+    elif offer:
+        why = join(why, f"You have no active offer — '{offer}' is the most common one in your category.")
+        cta = c.yes("Shall I set it up on your listing today, so searchers have a reason to pick you",
+                    "Aaj hi listing pe live kar doon, taaki searchers aapko chunein")
+    else:
+        cta = c.yes("Shall I publish 2 fresh posts today to win those searches back", "Aaj hi 2 fresh posts live kar doon")
+    body = join(head, facts, why, cta)
+    return _res(body, "binary", f"Dip on {metric} ({p}%) with the merchant's 30-day numbers + peer benchmark; reason + benefit-led CTA.",
+                params=[c.sal(), f"{p}%" if p else "", offer or ""])
 
 
 def m_seasonal_dip(c: Ctx) -> dict:
     metric, delta = _metric_delta(c)
     p = pct(delta)
-    beat = ""
+    beat = None
     for b in map(_d, _l(c.category.get("seasonal_beats"))):
-        note = b.get("note", "")
-        if any(k in note.lower() for k in ("lowest", "lull", "retention", "dip")):
-            beat = f"This is the expected {b.get('month_range', '')} pattern: {note}."
+        if any(k in str(b.get("note", "")).lower() for k in ("lowest", "lull", "retention", "dip")):
+            beat = b
             break
-    if not beat and c.payload.get("season_note"):
-        beat = f"This is expected seasonality ({human(c.payload.get('season_note'))})."
-    agg = _d(c.merchant.get("customer_aggregate"))
-    members = fmt_int(agg.get("total_unique_ytd"))
-    head = f"{c.sal()}, {human(metric)} are down {p}% this week — no panic." if p else f"{c.sal()}, {human(metric)} are dipping this week — no panic."
-    action = f"Better ROI now: keep your {members} existing {c.audience()}s engaged instead of spending on ads." if members \
-        else ("" if "retention" in beat.lower() else "Better ROI now: focus on retention instead of ad spend.")
-    body = join(head, beat, c.perf_line(), action, c.ask(f"a 3-message retention plan for current {c.audience()}s"))
-    return _res(body, "binary", "Seasonal dip reframed with category seasonal beat; retention over acquisition.",
-                params=[c.sal(), f"{p}%"])
+    reason = (f"that's the normal {beat.get('month_range', '')} pattern for {c.cat} ({_no_dot(str(beat.get('note', '')))})"
+              if beat else (f"that's expected seasonality ({human(c.payload.get('season_note'))})" if c.payload.get("season_note") else ""))
+    head = f"{c.sal()}, {human(metric)} are down {p}% this week" if p else f"{c.sal()}, {human(metric)} are dipping this week"
+    head += f" — {reason}." if reason else "."
+    members = fmt_int(_d(c.merchant.get("customer_aggregate")).get("total_unique_ytd"))
+    who = f"your {members} existing {c.audience()}s" if members else f"your current {c.audience()}s"
+    body = join(head, c.yes(f"Shall I draft a 3-message plan to keep {who} coming instead of spending on ads",
+                            f"Ads ki jagah {who} ke liye 3-message retention plan bana doon"))
+    return _res(body, "binary", "Seasonal dip reframed with the category's own seasonal beat; retention over acquisition.",
+                params=[c.sal(), f"{p}%" if p else ""])
 
 
 def m_perf_spike(c: Ctx) -> dict:
@@ -470,20 +501,36 @@ def m_perf_spike(c: Ctx) -> dict:
     p = pct(delta)
     driver = human(c.payload.get("likely_driver"))
     head = f"{c.sal()}, your {human(metric)} are up {p}% this week" if p else f"{c.sal()}, your {human(metric)} are climbing this week"
-    head += f" — looks driven by your {driver}." if driver else "."
-    offers = c.active_offers()
-    lever = f"A follow-up post pinning '{offers[0]}' converts the extra traffic while it lasts." if offers else \
-        "A follow-up post now converts the extra traffic while it lasts."
-    body = join(head, c.perf_line(), c.peer_views_line(), lever, c.ask("a follow-up post draft"))
-    return _res(body, "binary", f"Performance spike ({p}%) — momentum + effort externalization.", params=[c.sal(), f"{p}%"])
+    if driver:
+        head += f", most likely from your {driver}."
+    else:
+        views = _num(c.perf.get("views"))
+        avg = _num(c.peer.get("avg_views_30d"))
+        if views is not None and avg and views > avg * 1.1:
+            head += f" — you're now at {int(views):,} views a month, ahead of the {int(avg):,} average for {c.peer_scope() or 'peers'}."
+        elif c.perf_line():
+            head += f" ({_no_dot(c.perf_line())[0].lower() + _no_dot(c.perf_line())[1:]})."
+        else:
+            head += "."
+    offer, own = _offer_or_catalog(c)
+    if offer and own:
+        cta = c.yes(f"Shall I pin '{offer}' in a follow-up post while the traffic is hot",
+                    f"Traffic garam hai — '{offer}' ka follow-up post pin kar doon")
+    elif offer:
+        cta = c.yes(f"Shall I add a '{offer}' offer to turn the extra views into bookings",
+                    f"Extra views ko bookings mein badalne ke liye '{offer}' offer add kar doon")
+    else:
+        cta = c.yes("Shall I publish a follow-up post while the traffic is hot", "Follow-up post abhi live kar doon")
+    body = join(head, cta)
+    return _res(body, "binary", f"Spike ({p}%) with its likely driver; momentum + effort externalization.",
+                params=[c.sal(), f"{p}%" if p else "", driver])
 
 
 def m_renewal(c: Ctx) -> dict:
     sub = _d(c.merchant.get("subscription"))
     days = c.payload.get("days_remaining", sub.get("days_remaining"))
-    plan = c.payload.get("plan") or sub.get("plan") or ""
+    plan = _txt(c.payload.get("plan") or sub.get("plan") or "", 30)
     amt = fmt_int(c.payload.get("renewal_amount"))
-    plan = _txt(plan, 30)
     label = "trial" if plan.lower() == "trial" else f"{plan + ' ' if plan else ''}plan"
     dn = _num(days)
     if dn is None:
@@ -492,79 +539,84 @@ def m_renewal(c: Ctx) -> dict:
         head = f"{c.sal()}, your {label} expires today"
     else:
         head = f"{c.sal()}, your {label} {'ends' if label == 'trial' else 'renews'} in {int(dn)} days"
-    head += f" (₹{amt})." if amt else "."
-    d = fmt_int(c.perf.get("directions"))
-    roi = c.perf_line()
-    if roi and d:
-        roi = roi[:-1] + f", {d} direction requests."
-    body = join(head, roi and f"What it delivered — {roi[0].lower() + roi[1:]}", c.ask("the renewal link"))
-    return _res(body, "binary", "Renewal nudge anchored on the merchant's own 30-day results.", params=[c.sal(), str(days)])
+    head += f" (₹{amt})" if amt else ""
+    v, cl, d = fmt_int(c.perf.get("views")), fmt_int(c.perf.get("calls")), fmt_int(c.perf.get("directions"))
+    got = ", ".join(x for x in [f"{v} views" if v else "", f"{cl} calls" if cl else "", f"{d} direction requests" if d else ""] if x)
+    head += f" — in the last 30 days it brought you {got}." if got else "."
+    body = join(head, c.yes("Shall I send the renewal link so none of that pauses", "Renewal link bhej doon taaki kuch ruke nahi"))
+    return _res(body, "binary", "Renewal anchored on the merchant's own 30-day results (loss aversion).",
+                params=[c.sal(), str(int(dn)) if dn is not None else "", got])
 
 
 def m_festival(c: Ctx) -> dict:
-    fest = c.payload.get("festival")
+    fest = _txt(c.payload.get("festival"), 30)
     dt = parse_dt(c.payload.get("date"))
-    days = c.payload.get("days_until")
+    days = _num(c.payload.get("days_until"))
     if days is None and dt and c.now:
         days = (dt - c.now).days
-    beat = ""
+    beat = None
     for b in map(_d, _l(c.category.get("seasonal_beats"))):
-        note = b.get("note", "")
-        if any(k in note.lower() for k in ("festival", "diwali", "wedding", "gifting", "feast")):
-            beat = f"Category pattern for {b.get('month_range', '')}: {note}."
+        if any(k in str(b.get("note", "")).lower() for k in ("festival", "diwali", "wedding", "gifting", "feast")):
+            beat = b
             break
     if fest:
-        head = f"{c.sal()}, {fest} is on {fmt_date(dt)}" if dt else f"{c.sal()}, {fest} is coming up"
-        head += f" ({days} days out)." if days not in (None, "") else "."
+        head = f"{c.sal()}, {fest} is {int(days)} days out" if days is not None else f"{c.sal()}, {fest} is coming up"
+        head += f" ({fmt_date(dt)})" if dt else ""
     else:
-        head = f"{c.sal()}, festive season is coming up for {c.m_name}{c.where()}."
-    offers = c.active_offers()
-    noun = f"a festive post + WhatsApp draft built on '{offers[0]}'" if offers else "a festive offer + post draft"
-    body = join(head, beat, "Merchants who lock a festive offer early catch the early searches.", c.ask(noun))
-    return _res(body, "binary", "Festival timing from trigger + category seasonal beat.", params=[c.sal(), fest or "festival"])
+        head = f"{c.sal()}, festive season is coming up"
+    head += f" — in {c.cat}, {beat.get('month_range', '')} is the peak: {_no_dot(str(beat.get('note', '')))}." if beat else "."
+    offer, own = _offer_or_catalog(c)
+    cta = (c.yes(f"Shall I set up a festive version of '{offer}' now, before the rush", f"Rush se pehle '{offer}' ka festive version set kar doon")
+           if offer and own else c.yes("Shall I draft a festive offer + post now, before the rush", "Rush se pehle festive offer + post bana doon"))
+    body = join(head, cta)
+    return _res(body, "binary", "Festival countdown + category seasonal proof; early-mover CTA on the merchant's real offer.",
+                params=[c.sal(), fest or "festival", offer or ""])
 
 
 def m_curious(c: Ctx) -> dict:
     views, calls = fmt_int(c.perf.get("views")), fmt_int(c.perf.get("calls"))
+    options = (c.active_offers() or [])[:2] or [t for t in (c.catalog_offer(),) if t]
+    hint = f" — {(' ya ' if c.hi else ' or ').join(repr(o) for o in options)}?" if options else "?"
     stats = f"Your listing got {views} views and {calls} calls in 30 days." if (views and calls) else ""
-    q = (f"{c.sal()}, ek quick sawaal — is hafte {c.m_name} pe sabse zyada kis service ki enquiry aayi?"
-         if c.hi else f"{c.sal()}, quick one — which service got the most enquiries at {c.m_name} this week?")
-    body = join(q, stats, "Tell me and I'll turn it into a Google post + a ready WhatsApp reply for price questions.")
-    return _res(body, "open_ended", "Asking-the-merchant lever with reciprocity (Vera does the drafting).", params=[c.sal(), c.m_name])
+    if c.hi:
+        q = f"{c.sal()}, ek quick sawaal — is hafte {c.m_name or 'aapke yahan'} pe sabse zyada kis service ki enquiry aayi{hint}"
+        tail = "Batao, main 10 minute mein uska Google post + price-enquiry ka ready reply bana dungi, taaki woh enquiries booking mein badlein."
+    else:
+        q = f"{c.sal()}, quick one — which service got the most enquiries at {c.m_name or 'your place'} this week{hint}"
+        tail = "Tell me and I'll turn it into a Google post + a ready reply for price questions, so those enquiries become bookings."
+    return _res(join(q, stats, tail), "open_ended", "Asking-the-merchant lever, anchored on their real offers + 30-day numbers; reciprocity.",
+                params=[c.sal(), c.m_name])
 
 
 def m_winback(c: Ctx) -> dict:
     lapsed = fmt_int(c.payload.get("lapsed_customers_added_since_expiry"))
     days = fmt_int(c.payload.get("days_since_expiry") or _d(c.merchant.get("subscription")).get("days_since_expiry"))
     dip = pct(c.payload.get("perf_dip_pct"))
-    bits = []
-    if days:
-        bits.append(f"it's been {days} days since your plan expired")
-    if dip:
-        bits.append(f"views are down {dip}% since")
-    head = f"{c.sal()}, " + (", and ".join(bits) + "." if bits else f"quick check-in on {c.m_name}.")
-    lapsed_s = f"{lapsed} customers have lapsed in that window — they're the cheapest to win back." if lapsed else ""
-    offers = c.active_offers()
-    offer_s = f"'{offers[0]}' is still live to use as the hook." if offers else ""
-    body = join(head, lapsed_s, offer_s, c.ask("a 3-line win-back WhatsApp for them"))
-    return _res(body, "binary", "Win-back with lapsed-customer count and expiry window from trigger.", params=[c.sal(), lapsed or ""])
+    if lapsed:
+        head = f"{c.sal()}, {lapsed} customers have lapsed" + (f" since your plan expired {days} days ago" if days else "")
+    else:
+        head = f"{c.sal()}, your plan expired {days} days ago" if days else f"{c.sal()}, repeat visits are slipping"
+    head += f", and views are down {dip}%." if dip else "."
+    offer, own = _offer_or_catalog(c)
+    cta = (c.yes(f"Shall I send them a win-back WhatsApp with '{offer}'", f"Unhe '{offer}' ke saath win-back WhatsApp bhej doon")
+           if offer and own else c.yes("Shall I send them a 3-line win-back WhatsApp", "Unhe 3-line win-back WhatsApp bhej doon"))
+    body = join(head, "Lapsed regulars are the cheapest customers to win back." if lapsed else "", cta)
+    return _res(body, "binary", "Lapsed-customer count + expiry window from the trigger; win-back CTA.", params=[c.sal(), lapsed or ""])
 
 
 def m_ipl(c: Ctx) -> dict:
-    match, venue = c.payload.get("match"), c.payload.get("venue")
+    match, venue = _txt(c.payload.get("match"), 40), _txt(c.payload.get("venue"), 40)
     t = parse_dt(c.payload.get("match_time_iso"))
     when = t.strftime("%I:%M%p").lstrip("0").lower() if t else ""
-    head = f"{c.sal()}, {match} tonight" if match else f"{c.sal()}, IPL match tonight"
-    head += (f" at {venue}" if venue else "") + (f", {when}." if when else ".")
+    head = f"{c.sal()}, {match or 'IPL match'} tonight" + (f" at {venue}" if venue else "") + (f", {when}" if when else "")
     item = c.digest(None, ("seasonal",))
-    insight = ""
-    if item and "ipl" in (item.get("title", "") + item.get("id", "")).lower():
-        insight = first_sentence(item.get("summary"))
-        if item.get("source"):
-            insight = insight[:-1] + f" — {item.get('source')}."
+    if item and "ipl" in (str(item.get("title", "")) + str(item.get("id", ""))).lower() and item.get("summary"):
+        head += f" — {_no_dot(first_sentence(item.get('summary')))}" + (f" ({item.get('source')})." if item.get("source") else ".")
+    else:
+        head += "."
     weekend = c.payload.get("is_weeknight") is False
     offers = c.active_offers()
-    play = ""
+    note, cta = "", c.yes("Shall I post a match-night special on your listing", "Match-night special listing pe daal doon")
     if offers:
         o = offers[0]
         days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -574,69 +626,72 @@ def m_ipl(c: Ctx) -> dict:
             a, b, d = days.index(rng.group(1)), days.index(rng.group(2)), t.weekday()
             valid_tonight = a <= d <= b if a <= b else (d >= a or d <= b)
         if not valid_tonight:
-            play = f"Note: '{o}' doesn't run on {t.strftime('%A')}s — a delivery-only match combo is the better play tonight."
+            note = f"Your '{o}' doesn't run on {t.strftime('%A')}s."
+            cta = c.yes("Shall I push a delivery-only match combo before the match starts", "Match se pehle delivery-only combo push kar doon")
         elif weekend:
-            play = f"Tonight, push '{o}' for delivery/takeaway rather than a dine-in promo."
+            cta = c.yes(f"Shall I push '{o}' for delivery before the match starts", f"Match se pehle '{o}' delivery ke liye push kar doon")
         else:
-            play = f"Good night for a match-night dine-in push around '{o}'."
-    body = join(head, insight, play, c.ask("the match-night post + WhatsApp story"))
-    return _res(body, "binary", "IPL match from trigger + category IPL insight; offer-specific play.", params=[c.sal(), match or "IPL"])
+            cta = c.yes(f"Shall I post '{o}' as tonight's match-night special", f"'{o}' ko aaj ka match-night special bana doon")
+    body = join(head, note, cta)
+    return _res(body, "binary", "Tonight's match from the trigger + the category's IPL insight; offer-aware play.",
+                params=[c.sal(), match or "IPL"])
 
 
 def m_review_theme(c: Ctx) -> dict:
-    theme = c.payload.get("theme")
-    n = c.payload.get("occurrences_30d")
-    quote = c.payload.get("common_quote")
+    theme = c.payload.get("theme") if isinstance(c.payload.get("theme"), str) else None
+    n = fmt_int(c.payload.get("occurrences_30d"))
+    quote = _txt(c.payload.get("common_quote"), 90)
     if not theme:
         for r in map(_d, _l(c.merchant.get("review_themes"))):
-            if r.get("sentiment") == "neg":
-                theme, n = r.get("theme"), r.get("occurrences_30d")
+            if r.get("sentiment") == "neg" and isinstance(r.get("theme"), str):
+                theme, n = r.get("theme"), fmt_int(r.get("occurrences_30d"))
                 break
     if not theme:
-        pos = sorted((_d(r) for r in _l(c.merchant.get("review_themes"))),
+        pos = sorted((r for r in map(_d, _l(c.merchant.get("review_themes"))) if isinstance(r.get("theme"), str)),
                      key=lambda r: -(_num(r.get("occurrences_30d")) or 0))
-        if not pos or not pos[0].get("theme"):
-            body = join(f"{c.sal()}, a new pattern is showing up in {c.m_name or 'your'}'s recent reviews.", c.perf_line(),
-                        "Spotting a theme early is the cheapest way to protect your rating.",
-                        c.ask("the 30-day review summary with exact quotes + reply drafts"))
-            return _res(body, "binary", "review_theme_emerged trigger without theme data: flag it truthfully, offer the summary.",
+        if not pos:
+            body = join(f"{c.sal()}, a new pattern is showing up in your recent reviews — catching it early is the cheapest way to protect your rating.",
+                        c.yes("Shall I send the 30-day summary with exact quotes + reply drafts", "30-din ka review summary + reply drafts bhej doon"))
+            return _res(body, "binary", "review_theme_emerged without theme data: flagged truthfully, summary offered.",
                         params=[c.sal(), c.m_name])
         r = pos[0]
-        body = join(f"{c.sal()}, your reviews keep praising {human(r.get('theme'))}"
-                    + (f" — {r.get('occurrences_30d')} mentions in 30 days." if r.get("occurrences_30d") else "."),
-                    "Putting that line in your Google description turns reviews into bookings.",
-                    c.ask("a refreshed description + a post quoting 2 of those reviews"))
-        return _res(body, "binary", "Review theme from merchant's own review_themes; social proof.",
-                    params=[c.sal(), human(r.get("theme"))])
-    trend = " and rising" if c.payload.get("trend") == "rising" else ""
-    head = f"{c.sal()}, {n} reviews in the last 30 days mention {human(theme)}{trend}." if n else \
-        f"{c.sal()}, a review theme is emerging: {human(theme)}{trend}."
-    q = f"One says: \"{quote}\"." if quote else ""
-    body = join(head, q, "Replying publicly within 48h limits the rating damage.",
-                c.ask("reply templates for those reviews + a 1-line fix note for your team"))
-    return _res(body, "binary", "Review theme from trigger with verbatim quote; loss aversion on rating.", params=[c.sal(), human(theme)])
+        k = fmt_int(r.get("occurrences_30d"))
+        body = join(f"{c.sal()}, your reviews keep praising {human(r.get('theme'))}" + (f" — {k} mentions in 30 days." if k else "."),
+                    c.yes("Shall I add that to your Google description + post 2 of those reviews",
+                          "Yeh line Google description mein daal ke 2 reviews post kar doon"))
+        return _res(body, "binary", "Positive review theme from the merchant's own data as social proof.", params=[c.sal(), human(r.get("theme"))])
+    trend = ", and it's rising" if c.payload.get("trend") == "rising" else ""
+    head = (f"{c.sal()}, {n} reviews this month mention {human(theme)}" if n else f"{c.sal()}, reviews are starting to mention {human(theme)}")
+    head += (f" (\"{quote}\"){trend}." if quote else f"{trend}.")
+    body = join(head, c.yes("Shall I draft public replies + a 1-line fix note for your team today",
+                            "Aaj hi public replies + team ke liye 1-line fix note draft kar doon"))
+    return _res(body, "binary", "Review theme with count + verbatim quote from the trigger; loss aversion on rating.",
+                params=[c.sal(), human(theme)])
 
 
 def m_milestone(c: Ctx) -> dict:
     metric = {"review_count": "reviews", "reviews": "reviews", "rating": "rating"}.get(
         str(c.payload.get("metric")), human(c.payload.get("metric")) or "reviews")
     now_v, goal = _num(c.payload.get("value_now")), _num(c.payload.get("milestone_value"))
+    views = fmt_int(c.perf.get("views"))
     if now_v is not None and goal is not None and goal > now_v:
-        head = f"{c.sal()}, you're at {int(now_v)} {metric} — just {int(goal - now_v)} away from {int(goal)}."
-    elif goal is not None:
-        head = f"{c.sal()}, you just crossed {int(goal)} {metric}!"
+        head = f"{c.sal()}, you're {int(goal - now_v)} {metric} away from {int(goal)} ({int(now_v)} today)."
+        why = f"A round {int(goal)} stands out to the {views} people who see your listing every month." if views else ""
+        cta = c.yes(f"Shall I send a thank-you WhatsApp to your regulars asking for a review, to get you past {int(goal)} this week",
+                    f"Regulars ko thank-you WhatsApp bhej ke review maang loon, taaki is hafte {int(goal)} paar ho jaye")
     else:
-        head = f"{c.sal()}, {c.m_name or 'your listing'} just hit a {metric} milestone!"
-    body = join(head, c.perf_line() if goal is None else "", "A short thank-you post asking happy customers to share feedback usually closes the gap in days.",
-                c.ask("the thank-you post + a WhatsApp nudge for regulars"))
-    return _res(body, "binary", "Milestone progress from trigger; social proof + small ask.", params=[c.sal(), metric])
+        head = (f"{c.sal()}, you just crossed {int(goal)} {metric} 🎉" if goal is not None
+                else f"{c.sal()}, {c.m_name or 'your listing'} just hit a {metric} milestone 🎉")
+        why = f"That's social proof for the {views} people who see your listing every month." if views else ""
+        cta = c.yes("Shall I post a thank-you on your listing to show it off", "Listing pe thank-you post daal ke isse dikha doon")
+    body = join(head, why, cta)
+    return _res(body, "binary", "Milestone gap from the trigger + reach; social-proof building CTA.", params=[c.sal(), metric])
 
 
 def m_planning(c: Ctx) -> dict:
     topic = human(c.payload.get("intent_topic")) or "your new program"
-    said = c.payload.get("merchant_last_message")
+    said = _txt(c.payload.get("merchant_last_message"), 140)
     offers = c.active_offers()
-    lines: List[str] = []
     base = None
     for o in offers:
         if price_in(o):
@@ -656,96 +711,116 @@ def m_planning(c: Ctx) -> dict:
     name = c.owner or c.m_name
     body = f"{name + ', ' if name else ''}{ack}\n" + "\n".join(lines) + "\n" + (
         "Isko Google post + WhatsApp flyer bana doon? Reply YES." if c.hi else
-        "Want me to turn it into a Google post + WhatsApp flyer? Reply YES.")
+        "Shall I turn it into a Google post + WhatsApp flyer? Reply YES.")
     return {"body": body.strip(), "cta": "binary", "send_as": "vera",
             "rationale": "Merchant already expressed intent — delivered a draft artifact built on their real offer.",
             "template_params": [name, topic]}
 
 
 def m_competitor(c: Ctx) -> dict:
-    name, dist = c.payload.get("competitor_name"), c.payload.get("distance_km")
-    their = c.payload.get("their_offer")
+    name = _txt(c.payload.get("competitor_name"), 40)
+    dist = _num(c.payload.get("distance_km"))
+    their = _txt(c.payload.get("their_offer"), 60)
     who = name or f"a new {c.noun('place')}"
-    head = f"{c.sal()}, heads-up: {who} opened" + (f" {dist} km from you" if dist else f" near you{c.where()}")
+    head = f"{c.sal()}, heads-up: {who} opened" + (f" {dist:g} km from you" if dist else f" near you{c.where()}")
     opened = parse_dt(c.payload.get("opened_date"))
     head += f" on {fmt_date(opened)}." if opened else "."
-    theirs = f"They're advertising '{their}'." if their else ""
     offers = c.active_offers()
-    mine = ""
-    if offers:
-        mine = f"Your '{offers[0]}' is live — worth a fresh post so searchers see it first."
-    elif c.catalog_offer():
-        mine = f"You have no live offer to answer with — '{c.catalog_offer()}' is the usual category hook."
+    mine = offers[0] if offers else None
+    theirs = ""
+    if their:
+        theirs = f"They're advertising '{their}'"
+        tp, mp = price_in(their), price_in(mine or "")
+        theirs += f" — ₹{mp - tp} under your '{mine}'." if (tp and mp and tp < mp) else "."
+    stance = f"Your '{mine}' is live — worth a fresh post so searchers see it first." if mine and not their else ""
+    if not mine and c.catalog_offer():
+        stance = f"You have no live offer to answer with — '{c.catalog_offer()}' is the usual category hook."
     stale = c.stale_posts_days()
-    stale_s = f"Your last post is {stale} days old." if stale else ""
-    body = join(head, theirs, mine, stale_s, "" if (their or stale) else c.perf_line(),
-                c.ask("a post highlighting your offer + reviews"))
-    return _res(body, "binary", "Competitor facts only from trigger payload; loss aversion.", params=[c.sal(), who])
+    facts = f"Your last post is {stale} days old." if stale else c.perf_line()
+    cta_en = (f"Shall I post your '{mine}' with your best reviews today, so nearby searchers still pick you first" if mine
+              else "Shall I put an answering offer live today, so nearby searchers still pick you first")
+    cta_hi = (f"Aaj hi '{mine}' best reviews ke saath post kar doon, taaki paas ke searchers aapko hi chunein" if mine
+              else "Aaj hi jawab mein offer live kar doon, taaki paas ke searchers aapko hi chunein")
+    body = join(head, theirs, stance, facts, c.yes(cta_en, cta_hi))
+    return _res(body, "binary", "Competitor facts only from the trigger payload; price gap computed from real offers; loss aversion + benefit CTA.",
+                params=[c.sal(), who, their])
 
 
 def m_dormant(c: Ctx) -> dict:
     days = fmt_int(c.payload.get("days_since_last_merchant_message"))
     topic = human(c.payload.get("last_topic"))
-    head = f"{c.sal()}, it's been {days} days since we last spoke" + (f" (about {topic})." if topic else ".") if days \
-        else f"{c.sal()}, quick check-in."
+    head = (f"{c.sal()}, it's been {days} days since we last spoke" + (f" (about {topic})." if topic else ".")) if days \
+        else f"{c.sal()}, quick check-in on {c.m_name or 'your listing'}."
     item = c.digest(None, ("trend", "research", "seasonal", "tech"))
-    hook = f"One thing worth your time: {item.get('title')} ({item.get('source')})." if item and item.get("source") else ""
-    body = join(head, hook or c.perf_line(), c.ask("a 2-line summary of what it means for you"))
-    return _res(body, "binary", "Re-engagement with a fresh, sourced hook instead of a generic ping.", params=[c.sal(), days or ""])
+    hook = (f"One thing worth 30 seconds: {_no_dot(str(item.get('title')))}" + (f" ({item.get('source')})." if item.get("source") else ".")
+            if item and item.get("title") else c.perf_line())
+    offer = (c.active_offers() or [None])[0]
+    tie = f"It fits well with your '{offer}'." if offer and item else ""
+    body = join(head, hook, tie,
+                c.yes(f"Shall I send 2 lines on how {c.m_name or 'you'} can turn this into more {_outcome(c)} this week",
+                      f"{c.m_name + ' ke' if c.m_name else 'Aapke'} liye isse zyada {_outcome(c)} kaise laayein, 2 line mein bhej doon"))
+    return _res(body, "binary", "Re-engagement: acknowledges the gap, fresh sourced hook tied to their offer, outcome-led CTA.",
+                params=[c.sal(), days or ""])
 
 
 def m_supply(c: Ctx) -> dict:
-    mol = c.payload.get("molecule")
+    mol = _txt(c.payload.get("molecule"), 40)
     batches = _strs(c.payload.get("affected_batches"))
-    mfr = c.payload.get("manufacturer")
+    mfr = _txt(c.payload.get("manufacturer"), 40)
     item = c.digest(c.payload.get("alert_id"), ("alert", "supply"))
-    src = f" ({item.get('source')})" if item and item.get("source") else ""
-    head = f"{c.sal()}, recall alert{src}: {mol or 'medicine'} batches {', '.join(batches)}" if batches \
-        else f"{c.sal()}, recall alert{src} on {mol or 'a medicine'}"
-    head += f" by {mfr}." if mfr else "."
-    reason = first_sentence(item.get("summary")) if item else ""
+    src = f"{item.get('source')}: " if item and item.get("source") else ""
+    head = f"{c.sal()}, {src}{mol or 'a medicine'} batches {', '.join(batches)}" if batches else f"{c.sal()}, {src}{mol or 'a medicine'}"
+    head += (f" by {mfr}" if mfr else "") + " are under a voluntary recall."
     rx = fmt_int(_d(c.merchant.get("customer_aggregate")).get("chronic_rx_count"))
-    rx_s = f"You have {rx} chronic-Rx customers — some may hold these batches." if rx else ""
-    promised = ""
-    for h in reversed(_l(c.merchant.get("conversation_history"))):
-        h = _d(h)
-        if h.get("from") == "merchant" and h.get("engagement") == "intent_action":
-            promised = "As you asked earlier, I can pull the list."
-            break
-    body = join(head, reason, rx_s, promised,
-                c.ask(f"the filtered list of {mol or 'affected'} customers + a replacement message"))
-    return _res(body, "binary", "Recall alert with batch numbers from trigger; merchant's own Rx base.", params=[c.sal(), mol or ""])
+    promised = any(_d(h).get("from") == "merchant" and _d(h).get("engagement") == "intent_action"
+                   for h in _l(c.merchant.get("conversation_history")))
+    support = f"You have {rx} chronic-Rx customers who may hold them" + (" — and you asked for this list earlier." if promised else ".") if rx else ""
+    body = join(head, support, c.yes(f"Shall I pull the affected {mol or ''} list + a replacement message now".replace("  ", " "),
+                                     "Affected customers ki list + replacement message abhi bhej doon"))
+    return _res(body, "binary", "Recall with batch numbers from the trigger + the merchant's own Rx base; urgent, effortless CTA.",
+                params=[c.sal(), mol])
 
 
 def m_cat_seasonal(c: Ctx) -> dict:
     trends = []
     for t in _strs(c.payload.get("trends"))[:4]:
-        m = re.match(r"(.+?)_demand_([+-]?\d+)", str(t))
+        m = re.match(r"(.+?)_demand_([+-]?\d+)", t)
         trends.append(f"{m.group(1).replace('_', ' ')} {int(m.group(2)):+d}%" if m else human(t))
     season = human(c.payload.get("season"))
-    head = f"{c.sal()}, {season} demand shift" if season else f"{c.sal()}, seasonal demand shift"
-    head += f" for {c.cat}{c.where()}: {', '.join(trends)}." if trends else "."
-    body = join(head, "Moving the rising items to the front shelf + a WhatsApp list for regulars captures it early.",
-                c.ask("a shelf-rotation list + WhatsApp message"))
-    return _res(body, "binary", "Category seasonal trends from trigger payload with exact deltas.", params=[c.sal(), season])
+    head = f"{c.sal()}, {season + ' ' if season else ''}demand is shifting for {c.cat}{c.where()}"
+    head += f": {', '.join(trends)}." if trends else "."
+    views = fmt_int(c.perf.get("views"))
+    why = ("Regulars ask for the rising items first — if they're not on the front shelf, that sale walks next door."
+           + (f" Your listing already gets {views} views a month." if views else ""))
+    body = join(head, why, c.yes("Shall I send a shelf-rotation list + a WhatsApp for your regulars, so you're stocked before the peak",
+                                 "Peak se pehle shelf-rotation list + regulars ke liye WhatsApp bhej doon"))
+    return _res(body, "binary", "Category seasonal trends with exact deltas from the trigger; loss framing + benefit CTA.",
+                params=[c.sal(), season])
 
 
 def m_gbp(c: Ctx) -> dict:
     up = pct(c.payload.get("estimated_uplift_pct"))
     path = human(c.payload.get("verification_path")).replace(" or ", " or a ")
-    head = f"{c.sal()}, {c.m_name or 'your listing'} is still unverified on Google."
-    upl = f"Verified listings see about {up}% more views and calls." if up else ""
-    how = f"Verification is via {path}." if path else ""
-    body = join(head, upl, how, c.perf_line(), c.peer_views_line(), c.ask("step-by-step verification help"))
-    return _res(body, "binary", "Unverified GBP with uplift estimate from trigger.", params=[c.sal(), f"{up}%"])
+    head = f"{c.sal()}, {c.m_name or 'your listing'} is still unverified on Google — verified listings see about {up}% more views and calls." \
+        if up else f"{c.sal()}, {c.m_name or 'your listing'} is still unverified on Google."
+    facts = join(c.perf_line(), c.peer_views_line())
+    how = "It only takes a postcard or a phone call." if "postcard" in path else (f"It's done via {path}." if path else "")
+    body = join(head, facts, how, c.yes(f"Shall I walk you through it step by step, so that {up}% uplift starts counting for you" if up
+                                        else "Shall I walk you through it step by step",
+                                        "Step-by-step verify karwa doon, taaki yeh fayda aapko milne lage"))
+    return _res(body, "binary", "Unverified listing + uplift estimate from the trigger, merchant's numbers vs peers; benefit CTA.",
+                params=[c.sal(), f"{up}%" if up else ""])
 
 
 def m_generic(c: Ctx) -> dict:
-    offers = c.active_offers()
-    offer_s = f"Your '{offers[0]}' is live — a fresh post keeps it visible." if offers else ""
-    body = join(f"{c.sal()}, quick update on {c.m_name or 'your listing'}{c.where()}.", c.perf_line(), c.peer_line(),
-                offer_s, c.ask("a ready-to-publish post"))
-    return _res(body, "binary", "Fallback: merchant numbers + peer benchmark.", params=[c.sal(), c.m_name])
+    gap = _peer_gap(c)
+    line = c.perf_line()
+    head = f"{c.sal()}, {gap}." if gap else join(f"{c.sal()}, quick update on {c.m_name or 'your listing'}{c.where()}.", line)
+    offer, own = _offer_or_catalog(c)
+    cta = (c.yes(f"Shall I put '{offer}' in a fresh post today", f"Aaj hi '{offer}' ka fresh post live kar doon")
+           if offer and own else c.yes("Shall I publish a fresh post today", "Aaj hi fresh post live kar doon"))
+    body = join(head, cta)
+    return _res(body, "binary", "Fallback: merchant numbers + peer benchmark, CTA on the merchant's own offer.", params=[c.sal(), c.m_name])
 
 
 # =============================================================================
@@ -755,6 +830,37 @@ def m_generic(c: Ctx) -> dict:
 def _cust(body: str, cta: str, rationale: str, c: Ctx) -> dict:
     return _res(body, cta, rationale, send_as="merchant_on_behalf",
                 params=[c.c_ident().get("name", ""), c.m_name])
+
+
+def _outcome(c: Ctx) -> str:
+    return {"dentists": "appointments", "salons": "bookings", "gyms": "sign-ups", "restaurants": "orders",
+            "pharmacies": "orders"}.get(c.cat, "customers")
+
+
+_CARE = {
+    "dentists": ("Regular check-ups keep small issues small.", "Regular check-up se chhoti problem chhoti hi rehti hai."),
+    "salons": ("A quick refresh keeps your look on point.", "Ek quick refresh se look fresh rehta hai."),
+    "gyms": ("The first session back is the hardest — we'll make it easy.", "Wapas aane ka pehla session sabse mushkil hota hai — hum aasaan bana denge."),
+    "pharmacies": ("Staying on schedule with your medicines matters.", "Dawaiyan time pe lena zaroori hai."),
+    "restaurants": ("Your favourites are waiting.", "Aapke favourites intezaar kar rahe hain."),
+}
+
+
+def _care(c: Ctx) -> str:
+    en, hi = _CARE.get(c.cat, ("", ""))
+    return hi if c.c_hi() else en
+
+
+def _loyalty(c: Ctx) -> str:
+    """Personal touch from the customer's real relationship data."""
+    n = _num(c.rel().get("visits_total"))
+    svcs = [s for s in _strs(c.rel().get("services_received")) if s != "..." and not s.startswith("chronic_rx")]
+    last = human(svcs[-1]) if svcs else ""
+    if n and n >= 2:
+        if c.c_hi():
+            return f"Aap humare saath {int(n)} baar aa chuke hain" + (f" (last time: {last})." if last else ".")
+        return f"Thanks for your {int(n)} visits with us" + (f" — last time it was {last}." if last else ".")
+    return ""
 
 
 def _two_slot_cta(slots: List[str]) -> str:
@@ -773,14 +879,15 @@ def c_recall(c: Ctx) -> dict:
         s1 = f"Aapki last visit ko {since} ho gaye hain — {svc} due hai." if since else join(c.last_visit_line(), f"Aapka {svc} due hai.")
         s2 = (f"Aapke {pref} preference ke hisaab se slots ready hain: {' ya '.join(slots)}." if pref and slots
               else f"Aapke liye slots ready hain: {' ya '.join(slots)}." if slots else "")
+        s3 = f"Aapke liye: {offer}." if offer else ""
     else:
         s1 = f"It's been {since} since your last visit — your {svc} is due." if since else join(c.last_visit_line(), f"Your {svc} is due.")
         s2 = (f"Matching your {pref} preference: {' or '.join(slots)}." if pref and slots
               else f"Slots open for you: {' or '.join(slots)}." if slots else "")
-    s3 = f"{offer}." if offer else ""
-    cta_s = _two_slot_cta(slots) or "Reply YES to book."
-    body = join(f"{c.c_greet()}, {c.from_line()}", s1, s2, s3, cta_s)
-    return _cust(body, "binary", "Recall due: real last-visit gap, real open slots, merchant's active price.", c)
+        s3 = f"For you: {offer}." if offer else ""
+    cta_s = _two_slot_cta(slots) or ("Reply YES and we'll book you in." if not c.c_hi() else "Reply YES, hum booking kar denge.")
+    body = join(f"{c.c_greet()}, {c.from_line()}", s1, _loyalty(c), _care(c), s2, s3, cta_s)
+    return _cust(body, "binary", "Recall due: real last-visit gap and visit history, care line, real open slots, merchant's active price.", c)
 
 
 def c_lapsed(c: Ctx) -> dict:
@@ -790,33 +897,36 @@ def c_lapsed(c: Ctx) -> dict:
     gym = c.cat == "gyms"
     if c.c_hi():
         s1 = (f"Aapko aaye {since} ho gaye" + (" — hota hai, koi baat nahi." if gym else ".")) if since else c.last_visit_line()
-        s2 = f"Aapke {focus} goal pe wapas aane mein hum help karenge." if focus else ""
+        s2 = f"Aapke {focus} goal pe wapas aane mein hum help karenge." if focus else _care(c)
         s3 = f"Is hafte aapke liye: {offers[0]}." if offers else ""
         cta = "Reply YES, hum aapka slot hold kar lenge."
     else:
         s1 = (f"It's been {since} since your last visit" + (" — happens to everyone, no judgment." if gym else ".")) if since else c.last_visit_line()
-        s2 = f"We'd love to help you get back to your {focus} goal." if focus else ""
+        s2 = f"We'd love to help you get back to your {focus} goal." if focus else _care(c)
         s3 = f"This week for you: {offers[0]}." if offers else ""
-        cta = "Reply YES and we'll hold a slot for you."
-    body = join(f"{c.c_greet()}, {c.from_line()}", s1, s2, s3, cta)
-    return _cust(body, "binary", "Lapsed customer win-back with real gap + merchant offer; no-shame framing.", c)
+        cta = "Reply YES and we'll hold a slot for you — no commitment."
+    body = join(f"{c.c_greet()}, {c.from_line()}", s1, _loyalty(c), s2, s3, cta)
+    return _cust(body, "binary", "Lapsed-customer win-back: real gap + history, their own goal, merchant offer; no-shame framing.", c)
 
 
 def c_appointment(c: Ctx) -> dict:
     p = c.payload
     t = parse_dt(p.get("appointment_iso") or p.get("slot_iso"))
     when = p.get("slot_label") or p.get("time") or (t.strftime("%I:%M %p").lstrip("0") if t else "")
-    svc = human(p.get("service"))
+    svcs = [s for s in _strs(c.rel().get("services_received")) if s != "..."]
+    svc = human(p.get("service")) or (human(svcs[-1]) if svcs else "")
     what = f"{svc} appointment" if svc else c.noun("appt")
     where = f" at {c.m_name}{', ' + c.locality if c.locality else ''}" if c.m_name else ""
     if c.c_hi():
         s1 = f"reminder: kal aapka {what} hai{where}" + (f", {when}." if when else ".")
+        s2 = "Confirm karte hi aapka slot aapke liye hold rahega."
         cta = "Confirm ke liye 1, reschedule ke liye 2 reply karein."
     else:
         s1 = f"reminder: your {what} is tomorrow{where}" + (f" at {when}." if when else ".")
+        s2 = "Confirming now keeps your slot held for you."
         cta = "Reply 1 to confirm or 2 to reschedule."
-    body = join(f"{c.c_greet()},", s1, cta)
-    return _cust(body, "binary", "Appointment reminder with confirm/reschedule choice (booking flow).", c)
+    body = join(f"{c.c_greet()},", s1, s2, cta)
+    return _cust(body, "binary", "Appointment reminder with the real service + place, benefit of confirming, confirm/reschedule choice.", c)
 
 
 def c_trial(c: Ctx) -> dict:

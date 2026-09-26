@@ -371,9 +371,12 @@ def action_body(c: Optional[Ctx], hi: bool, from_role: str) -> str:
         return f"{lead}got it. Drafting the Google post + price-enquiry reply now; both land here in 2 minutes."
 
     where = f" in {c.locality}" if c.locality else ""
-    draft = f"{c.m_name}{where}{' — ' + offers[0] if offers else ''}. Walk in or message us to book."
-    body = (f"{lead}drafting it now{' featuring ' + repr(offers[0]) if offers else ''}.\n\n"
-            f"Post draft: \"{draft}\"\n\n")
+    if c.m_name:
+        draft = f"{c.m_name}{where}{' — ' + offers[0] if offers else ''}. Walk in or message us to book."
+        body = (f"{lead}drafting it now{' featuring ' + repr(offers[0]) if offers else ''}.\n\n"
+                f"Post draft: \"{draft}\"\n\n")
+    else:  # no merchant name in context: never print a half-empty draft
+        body = f"{lead}drafting it now{' featuring ' + repr(offers[0]) if offers else ''}. It lands here in 2 minutes. "
     body += "CONFIRM reply karein, aaj hi live kar dungi." if hi else "Reply CONFIRM and it goes live today."
     return body
 
