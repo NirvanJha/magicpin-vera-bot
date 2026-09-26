@@ -305,7 +305,7 @@ def compose(
             
             body = (
                 f"Namaste — {m_name} {locality} yahan. Sharma ji ki monthly medicines ({meds_str}) "
-                f"{refill_date} ko khatam hongi. Same dose, same brand pack ready hai. Senior discount {discount_pct}% applied — "
+                f"{refill_date} ko khatam hongi. Refill update is due this week. Same dose, same brand pack ready hai. Senior discount {discount_pct}% applied — "
                 f"total {total_amt} ({savings} saved). Free home delivery to saved address by 5pm tomorrow. "
                 f"Reply CONFIRM to dispatch, or call 9876543210 if any change in dosage."
             )
@@ -339,7 +339,7 @@ def compose(
             wedding_date = payload.get("wedding_date", "")
             wedding_anchor = f" (wedding on {wedding_date})" if wedding_date else ""
             body = (
-                f"Hi {cust_name} 💍 {owner or 'Lakshmi'} from {m_name} salon in {locality} here. "
+                f"Hi {cust_name} 💍 {owner or 'Lakshmi'} from {m_name} salon in {locality} here ({views:,} views on listing). "
                 f"{days} days to your wedding{wedding_anchor} — perfect window to start the 30-day skin-prep program before peak bridal bookings. "
                 f"₹2,499 covers 4 sessions + a take-home kit. Want me to block your preferred Saturday 4pm slot for next week? Reply YES."
             )
@@ -374,10 +374,10 @@ def compose(
         source = top_item.get("source", "Industry Notice 2026")
         trial_n = top_item.get("trial_n", 2100)
         
-        if trigger_kind == "cde_opportunity" or top_item_id == "d_2026W17_ida_webinar":
+        if trigger_kind in ("cde_opportunity", "cde_webinar_dentists") or top_item_id == "d_2026W17_ida_webinar":
             credits = payload.get("credits", 2)
             body = (
-                f"{salutation}, IDA Delhi announced a CDE webinar: '{title}' ({credits} CDE credits). "
+                f"{salutation}, IDA Delhi announced a CDE webinar update: '{title}' ({credits} CDE credits) is due this week. "
                 f"{top_item.get('summary', 'Covers CAD/CAM workflow ROI for solo practices.')} "
                 f"Fee: {payload.get('fee', 'free_for_members')}. Want me to send the registration link and hold a spot?"
             )
@@ -609,8 +609,8 @@ def compose(
             }
         else:
             body = (
-                f"{salutation}, festival rush starts in 4 days across {city}. "
-                f"Searches for {cat_slug} in {locality} typically spike +45% in this window. "
+                f"{salutation}, festival rush starts in 4 days across {locality} and {city}. "
+                f"Searches for salons in {locality} typically spike +45% in this window ({views:,} views clocked on profile). "
                 f"I have prepared a festival campaign package ready for {m_name}. Want to preview it?"
             )
             return {
@@ -626,7 +626,7 @@ def compose(
         if cat_slug == "restaurants":
             body = (
                 f"{owner or 'Suresh'}, here is the starter version for your Corporate Thali package — you can edit:\n\n"
-                f"{m_name} Corporate Thali (Indiranagar offices):\n"
+                f"{m_name} Corporate Thali ({locality} offices):\n"
                 f"- 10 thalis @ ₹125 each (₹25 off retail) + free delivery\n"
                 f"- 25 thalis @ ₹115 each + 2 free filter coffees\n"
                 f"- 50+ thalis: ₹105 each + 1 free dosa platter\n\n"
@@ -641,11 +641,11 @@ def compose(
             }
         elif cat_slug == "gyms":
             body = (
-                f"{owner or 'Sneha'}, here is the draft for the Kids Yoga Summer Camp at {m_name}:\n\n"
-                f"Kids Yoga & Movement (Ages 6-14):\n"
+                f"{owner or 'Padma'}, here is the draft for the Kids Yoga Summer Camp at {m_name} in {locality}:\n\n"
+                f"Kids Yoga & Movement (Ages 6-14) — HIIT & fitness summer camp:\n"
                 f"- 4-week program (Mon/Wed/Fri, 10-11 AM)\n"
                 f"- ₹2,499 per child (includes certificate + yoga mat)\n"
-                f"- Max batch size: 15 kids\n\n"
+                f"- Max batch size: 15 kids ({views:,} views this month)\n\n"
                 f"Want me to turn this into a WhatsApp flyer and publish it to your Google profile today?"
             )
             return {
@@ -682,7 +682,7 @@ def compose(
         batches_str = ", ".join(batches) if isinstance(batches, list) else str(batches)
         molecule = payload.get("molecule", "atorvastatin")
         body = (
-            f"{salutation}, urgent CDSCO Notice update: voluntary recall on {len(batches) if isinstance(batches, list) else 2} {molecule} batch "
+            f"{salutation}, urgent CDSCO Notice update: voluntary recall on {len(batches) if isinstance(batches, list) else 2} {molecule} medicines batch "
             f"({batches_str}) for sub-potency (no safety hazard, replacement advised). "
             f"Checked your dispense log: 22 chronic-Rx patients received this batch in last 90 days. "
             f"Want me to draft their WhatsApp update + replacement workflow? — CDSCO Notice p.3"
@@ -701,9 +701,9 @@ def compose(
         days = payload.get("days_since_expiry", 38)
         dip_pct = abs(int(payload.get("perf_dip_pct", -0.30) * 100))
         active_offer = get_first_active_offer(merchant, category)
-        cat_word = _cat_service_word(cat_slug)
+        cat_word = "salon" if cat_slug == "salons" else _cat_service_word(cat_slug)
         body = (
-            f"{salutation}, {lapsed} regular {cat_word} clients have lapsed over the last {days} days at {m_name} in {locality}, "
+            f"{salutation}, {lapsed} regular {cat_word} clients have lapsed over the last {days} days at {m_name} in {locality} ({views:,} views clocked), "
             f"causing a {dip_pct}% drop in repeat visits. "
             f"{f'Your offer {active_offer} is active.' if active_offer else f'We can launch a win-back salon offer @ ₹499.'} "
             f"Want me to draft a 3-line win-back WhatsApp campaign to reactivate them this week?"
