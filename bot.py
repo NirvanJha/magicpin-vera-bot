@@ -363,8 +363,9 @@ def compose(
             }
         elif trigger_kind == "regulation_change" or top_item_id == "d_2026W17_dci_radiograph":
             deadline = payload.get("deadline_iso", "2026-12-15")
+            deadline_str = f" (effective {deadline})" if deadline and deadline not in title else ""
             body = (
-                f"{salutation}, regulatory update from DCI: {title} (effective {deadline}). "
+                f"{salutation}, regulatory update from DCI: {title}{deadline_str}. "
                 f"{top_item.get('summary', 'Maximum dose per exposure drops from 1.5 mSv to 1.0 mSv.')} "
                 f"Want me to send the 1-page SOP compliance checklist for your clinic's X-ray setup?"
             )
@@ -438,7 +439,7 @@ def compose(
             body = (
                 f"{salutation}, I noticed your profile views dropped {dip_pct}% this week ({views:,} views, {calls} calls). "
                 f"Nearby competitors in {locality} are capturing search volume with fresh weekly posts. "
-                f"I have already drafted 2 Google posts and an active offer to revive your search ranking. Want to review them?"
+                f"I can prepare 2 Google posts and an active offer to revive your search ranking. Want me to draft them?"
             )
             return {
                 "body": body,
@@ -453,8 +454,8 @@ def compose(
         spike_pct = abs(int(views_pct * 100)) if views_pct else 28
         body = (
             f"{salutation}, your Google listing is surging — views jumped +{spike_pct}% over the last 7 days ({views:,} views, {calls} calls). "
-            f"To convert this traffic into booked walk-ins, I drafted a highlighted weekend post with your active pricing. "
-            f"Takes 2 minutes to review — want me to send it over?"
+            f"To convert this traffic into booked walk-ins, I can prepare a highlighted weekend post with your active pricing. "
+            f"Takes 2 minutes to review — want me to send a draft over?"
         )
         return {
             "body": body,
