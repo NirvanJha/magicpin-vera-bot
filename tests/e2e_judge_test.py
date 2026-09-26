@@ -48,6 +48,8 @@ print("\n=== PHASE 1: WARMUP ===")
 s, h, lat = call("GET", "/v1/healthz")
 check("healthz 200 + zeros before any push", s == 200 and h["status"] == "ok" and sum(h["contexts_loaded"].values()) == 0, h)
 s, m, _ = call("GET", "/v1/metadata")
+req = urllib.request.Request(BASE + "/v1/healthz", method="HEAD")
+check("HEAD /v1/healthz -> 200 (uptime monitors probe with HEAD)", urllib.request.urlopen(req, timeout=10).status == 200)
 check("metadata has all 7 fields", s == 200 and all(k in m for k in
       ["team_name", "team_members", "model", "approach", "contact_email", "version", "submitted_at"]), m)
 

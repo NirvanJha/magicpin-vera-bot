@@ -30,7 +30,7 @@ from composer import compose, parse_dt  # noqa: F401  (compose re-exported)
 from conversation_handlers import ConversationState, respond
 
 
-app = FastAPI(title="magicpin Vera Bot", version="2.1.2",
+app = FastAPI(title="magicpin Vera Bot", version="2.1.3",
               description="Pick an endpoint -> **Try it out** -> choose an example from the dropdown -> **Execute**.")
 log = logging.getLogger("vera")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -375,7 +375,7 @@ REPLY_DOC = _body_doc(
      ]})
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"status": "ok", "service": "magicpin-vera-bot",
             "endpoints": ["GET /v1/healthz", "GET /v1/metadata", "POST /v1/context", "POST /v1/tick", "POST /v1/reply"]}
@@ -390,8 +390,9 @@ async def tester():
     return FileResponse(page, media_type="text/html")
 
 
-@app.get("/v1/healthz")
-@app.get("/healthz", include_in_schema=False)
+# GET + HEAD: uptime monitors often probe with HEAD; answering 405 there can let a free host fall asleep.
+@app.api_route("/v1/healthz", methods=["GET", "HEAD"])
+@app.api_route("/healthz", methods=["GET", "HEAD"], include_in_schema=False)
 async def healthz():
     counts = {s: 0 for s in VALID_SCOPES}
     for (scope, _) in list(contexts):
@@ -399,8 +400,8 @@ async def healthz():
     return {"status": "ok", "uptime_seconds": int(time.time() - START_TIME), "contexts_loaded": counts}
 
 
-@app.get("/v1/metadata")
-@app.get("/metadata", include_in_schema=False)
+@app.api_route("/v1/metadata", methods=["GET", "HEAD"])
+@app.api_route("/metadata", methods=["GET", "HEAD"], include_in_schema=False)
 async def metadata():
     return {
         "team_name": "magicpin-ai-mastery",
@@ -409,7 +410,7 @@ async def metadata():
         "approach": "trigger-kind dispatch over 4 context layers; every fact sourced from pushed context; "
                     "suppression + per-merchant dedup on tick; intent-classified multi-turn replies",
         "contact_email": "nirvan.jha.ug23@nsut.ac.in",
-        "version": "2.1.2",
+        "version": "2.1.3",
         "submitted_at": "2026-04-26T08:00:00Z",
     }
 
