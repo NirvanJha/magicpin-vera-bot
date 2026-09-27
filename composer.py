@@ -769,17 +769,25 @@ def c_recall(c: Ctx) -> dict:
     slots = c.slot_labels()
     offer = c.offer_matching(*(svc.split()[-1:])) or (c.active_offers()[:1] or [None])[0]
     pref = human(_d(_d(c.customer).get("preferences")).get("preferred_slots"))
+    tooth = " 🦷" if c.cat == "dentists" else ""
     if c.c_hi():
-        s1 = f"Aapki last visit ko {since} ho gaye hain — {svc} due hai." if since else join(c.last_visit_line(), f"Aapka {svc} due hai.")
-        s2 = (f"Aapke {pref} preference ke hisaab se slots ready hain: {' ya '.join(slots)}." if pref and slots
-              else f"Aapke liye slots ready hain: {' ya '.join(slots)}." if slots else "")
+        opener = f"{c.c_greet().replace('Hi ', 'Namaste ', 1)} — {c.m_name or 'hum'} se ek chhota reminder{tooth}."
+        s1 = (f"Aapka {svc} ab due hai (pichhli visit ko {since} ho gaye)." if since
+              else join(f"Aapka {svc} ab due hai.", c.last_visit_line()))
+        s2 = (f"Is hafte do {pref + ' ' if pref else ''}slots khaali hain — {slots[0]} aur {slots[1]}." if len(slots) == 2
+              else f"Khaali slot: {slots[0]}." if slots else "")
+        s3 = f"Offer: {offer}." if offer else ""
+        cta = "Pehle slot ke liye 1, doosre ke liye 2 reply karein." if len(slots) == 2 else "Booking ke liye YES reply karein."
     else:
-        s1 = f"It's been {since} since your last visit — your {svc} is due." if since else join(c.last_visit_line(), f"Your {svc} is due.")
-        s2 = (f"Matching your {pref} preference: {' or '.join(slots)}." if pref and slots
-              else f"Slots open for you: {' or '.join(slots)}." if slots else "")
-    s3 = f"{offer}." if offer else ""
-    cta_s = _two_slot_cta(slots) or "Reply YES to book."
-    body = join(f"{c.c_greet()}, {c.from_line()}", s1, s2, s3, cta_s)
+        opener = f"{c.c_greet()} — a quick reminder from {c.m_name or 'us'}{tooth}."
+        s1 = (f"Your {svc} is due now; your last visit was {since} ago." if since
+              else join(f"Your {svc} is due now.", c.last_visit_line()))
+        s2 = (f"Two {pref + ' ' if pref else ''}slots are free: {slots[0]} and {slots[1]}." if len(slots) == 2
+              else f"A free slot: {slots[0]}." if slots else "")
+        s3 = f"Offer: {offer}." if offer else ""
+        cta = (f"Just reply 1 for {slots[0].split(',')[0]} or 2 for {slots[1].split(',')[0]}." if len(slots) == 2
+               else "Reply YES to book.")
+    body = join(opener, s1, s2, s3, cta)
     return _cust(body, "binary", "Recall due: real last-visit gap, real open slots, merchant's active price.", c)
 
 
@@ -848,8 +856,8 @@ def c_wedding(c: Ctx) -> dict:
     m = re.match(r"^(.*?)\s*(\d+-day)$", step)
     if m:
         step = f"{m.group(2)} {m.group(1)}"
-    s1 = (f"{days} days to your wedding" + (f" on {fmt_date(wd)}" if wd else "") + " 💍.") if days else "Congratulations again 💍."
-    s2 = f"This is the right window to start the {step}." if step else ""
+    s1 = (f"Your wedding is {days} days away" + (f" ({fmt_date(wd)})" if wd else "") + " 💍.") if days else "Congratulations again 💍."
+    s2 = f"Now's a good time to begin the {step}." if step else ""
     offer = c.offer_matching("bridal", "skin", "facial", "makeup", "spa", "glow")
     s3 = f"{offer} is on right now." if offer else ""
     body = join(f"{c.c_greet()}, {c.from_line()}", s1, s2, s3, "Reply YES and we'll block your first session.")
@@ -866,13 +874,13 @@ def c_refill(c: Ctx) -> dict:
     if c.c_hi():
         s1 = f"Aapki monthly dawaiyan ({', '.join(meds)})" if meds else "Aapki monthly dawaiyan"
         s1 += f" {fmt_date(out)} tak khatam ho jayengi." if out else " refill ke liye due hain."
-        s2 = "Same dose, same brand ready hai."
+        s2 = "Aapka regular pack — dose aur brand bilkul wahi — taiyaar hai."
         s3 = f"{senior} lagega." if senior else ""
         s4 = "Saved address pe home delivery." if delivery else ""
     else:
         s1 = f"Your monthly medicines ({', '.join(meds)})" if meds else "Your monthly medicines"
         s1 += f" run out on {fmt_date(out)}." if out else " are due for refill."
-        s2 = "Same dose, same brand is packed and ready."
+        s2 = "Your usual pack (no change in dose or brand) is ready."
         s3 = f"{senior} applies." if senior else ""
         s4 = "Home delivery to your saved address." if delivery else ""
     body = join(f"{c.c_greet()}, {c.from_line()}", s1, s2, s3, s4, "Reply YES to dispatch.")

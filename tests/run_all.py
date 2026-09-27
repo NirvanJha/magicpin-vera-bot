@@ -46,7 +46,8 @@ results = []
 print("── offline ──")
 for name, script in [("spec (challenge-brief §7)", "spec_test.py"), ("intents: tuning set", "test_reply_intents.py"),
                      ("intents: held-out #1", "held_out_intents.py"), ("intents: blind held-out #2", "held_out_intents_2.py"),
-                     ("conversation quality (replay)", "conversation_test.py")]:
+                     ("conversation quality (replay)", "conversation_test.py"),
+                     ("originality vs case studies", "originality_test.py")]:
     results.append(run(name, [str(TESTS / script)]))
 
 print(f"── live bot on {URL} ──")
