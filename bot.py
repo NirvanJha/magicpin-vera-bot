@@ -30,7 +30,7 @@ from composer import compose, parse_dt  # noqa: F401  (compose re-exported)
 from conversation_handlers import ConversationState, respond
 
 
-app = FastAPI(title="magicpin Vera Bot", version="2.1.3",
+app = FastAPI(title="magicpin Vera Bot", version="2.1.4",
               description="Pick an endpoint -> **Try it out** -> choose an example from the dropdown -> **Execute**.")
 log = logging.getLogger("vera")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -410,7 +410,7 @@ async def metadata():
         "approach": "trigger-kind dispatch over 4 context layers; every fact sourced from pushed context; "
                     "suppression + per-merchant dedup on tick; intent-classified multi-turn replies",
         "contact_email": "nirvan.jha.ug23@nsut.ac.in",
-        "version": "2.1.3",
+        "version": "2.1.4",
         "submitted_at": "2026-04-26T08:00:00Z",
     }
 
