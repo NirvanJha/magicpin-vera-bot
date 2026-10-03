@@ -1,42 +1,61 @@
 # Vera — magicpin AI Challenge submission
 
 [![CI](https://github.com/NirvanJha/magicpin-vera-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/NirvanJha/magicpin-vera-bot/actions/workflows/ci.yml)
-**Live bot:** `https://magicpin-vera-bot-vtz2.onrender.com/v1/*` · deliverables: [`bot.py`](bot.py) · [`submission.jsonl`](submission.jsonl) · [`conversation_handlers.py`](conversation_handlers.py) · full design notes: [`docs/DESIGN.md`](docs/DESIGN.md)
+
+**Live bot:** `https://magicpin-vera-bot-vtz2.onrender.com/v1/*` · **Deliverables:** [`bot.py`](bot.py) · [`submission.jsonl`](submission.jsonl) · [`conversation_handlers.py`](conversation_handlers.py) · **Design notes:** [`docs/DESIGN.md`](docs/DESIGN.md)
+
+## Results
+
+| Measure | Result |
+|---|---|
+| Official `judge_simulator.py` (local LLM judge), 19 messages scored | **43.2 / 50 (86%)**, every message 41–45, **0 fabrication penalties** |
+| Judge dimensions (out of 10) | Merchant fit 9.4 · Category fit 8.8 · Specificity 8.7 · Engagement 8.3 · Decision quality 8.0 |
+| Judge behaviour scenarios | **4 / 4 pass** |
+| Invented facts, audit of all 100 dataset triggers | **0** |
+| Test suites (CI on every push, bare Python + Docker) | **22 / 22 pass** |
+| Judge lifecycle end-to-end | 49 / 49 checks |
+| Reply intent accuracy | 100% tuning (166) · 100% held-out (54) · **90% blind held-out (51)** · 0 safety-critical misses |
+| Robustness | 9,000 fuzzed payloads: 0 failures, 0 leaked artefacts · 10 simulated-judge soaks: 0 violations · never returns a 500 |
+| Originality vs the 10 official case studies | max similarity 0.41, 0 near-duplicates |
+| Latency | median about 1 ms per message (no LLM at runtime) |
+| Longest uptime | 5.7 days on Render, no restart |
+
+The judge's summary prints 40/50 because it rounds each dimension down; 43.2 is the actual mean.
 
 ## Approach
 
-**One rule above all: every fact in a message must come from pushed context.** `compose()` ([`composer.py`](composer.py)) routes each of the 26 trigger kinds to a dedicated composer. Each composer reads names, numbers, prices, dates and sources only from the category, merchant, trigger and customer contexts. If a value is missing, the sentence that needed it is dropped; nothing is filled in with a default. Voice follows the category, messages are in Hinglish when the recipient speaks Hindi, and each ends with a single CTA. A final validator refuses to send any message containing raw data artefacts (`None`, `{`, `1e+308`). An audit of all 100 dataset triggers found **zero invented facts**. The only numbers not copied from context are computed values, such as days until a deadline and "suggested" bulk-price tiers derived from the merchant's own price.
+**Every fact in a message comes from pushed context.** `compose()` ([`composer.py`](composer.py)) routes each of 26 trigger kinds to a dedicated composer. Names, numbers, prices, dates and sources are read only from the category, merchant, trigger and customer contexts. A missing value drops its sentence; nothing is defaulted. The only numbers not copied verbatim are computed from context: days to a deadline, a competitor's price gap, calls lost against baseline, and bulk-price tiers derived from the merchant's own price. A final validator blocks any raw data artefact.
 
-**The server** ([`bot.py`](bot.py)) follows the testing brief's rules:
-- **Tick:** one message per recipient, `suppression_key` never reused, ordered by urgency, capped at 20.
-- **Context:** versioned updates (409 for an older version).
-- **Opt-outs:** STOP from a merchant is honoured for 30 days, and the bot keeps to its own earlier wait/end decisions.
-- **Teardown:** `/v1/teardown` wipes all state.
+**Every message is built to get a reply.** It gives the reason for messaging now, then the merchant's own numbers, plus a peer benchmark where one exists. It ends with one binary CTA that states the payoff ("to win back the ~6 calls/week you've lost") and, for drafts, confirms nothing goes live without approval. Voice follows the category, and messages switch to Hinglish when that is the recipient's language.
 
-It never returns a 500, and every trigger is processed in isolation.
+**The server** ([`bot.py`](bot.py)) implements the testing brief:
+- one message per recipient per tick, ordered by urgency, `suppression_key` never reused;
+- versioned context with 409 on stale versions;
+- a 30-day STOP honour that also covers the merchant's customers;
+- `/v1/teardown` to wipe all state.
 
-**Replies** ([`conversation_handlers.py`](conversation_handlers.py)) are labelled by a 22-intent classifier. The safety checks come first: auto-reply (nudge once, wait 24h, then end), opt-out, abuse, and off-topic asks such as GST (declined, then back to the original topic). After those, a commitment gets the actual deliverable straight away, with no further qualifying questions. Price/timing questions, "who are you?", "how did you get my number?", edits and hand-offs are answered from the conversation's own trigger. It never repeats itself within a conversation.
+**Replies** ([`conversation_handlers.py`](conversation_handlers.py)) go through a 22-intent classifier. Safety intents come first: auto-reply (nudge, wait 24h, end), opt-out, abuse, and off-topic asks. A commitment gets the deliverable immediately, and the bot never repeats itself.
 
 ## Tradeoffs
 
-- **Templates instead of an LLM at runtime.** Messages are fast (median about 1 ms), deterministic, and can't invent facts, at the cost of less varied wording. The official `judge_simulator.py`, scoring with a local LLM, gave every one of the 19 messages it scored between 41 and 45 out of 50, averaging 43.2 (86%), with no fabrication penalties. Its own summary line prints 40/50 because it rounds each dimension down before adding.
-- **Rules instead of a model for replies.** Easy to explain and to test. The classifier scores 100% on its 166-message training set, but **90% on a blind held-out set**, with 0 safety-critical misses. Unclear negatives default to a no-pressure reply, never a pitch.
-- **Conservative by default.** A STOP from a merchant also pauses messages sent to their customers on their behalf. Customers who explicitly opted out are skipped.
-- **Memory-only state.** This follows the brief ("must not persist context after the test"). Restart resilience is available as an opt-in (`VERA_STATE_FILE`), and `/v1/teardown` wipes it.
+- **Templates over a runtime LLM:** deterministic, fast and unable to hallucinate; wording varies less.
+- **Rules over a model for replies:** fully explainable and testable. Blind accuracy is 90%, and unclear negatives default to a no-pressure reply, never a pitch.
+- **Conservative consent:** a merchant's STOP also pauses messages to their customers, and opted-out customers are skipped.
+- **Memory-only state,** per the brief; opt-in restart persistence (`VERA_STATE_FILE`) is wiped by teardown.
 
 ## What additional context would have helped most
 
-1. **Consent scope matched to trigger kinds.** Most dataset customers only consent to `promotional_offers`, which makes recalls a grey area.
-2. **Real appointment times and open slots** for `appointment_tomorrow` and `trial_followup` triggers. Many trigger payloads are placeholders.
-3. **Review text and counts.** 5 of the 6 `review_theme_emerged` triggers carry no theme at all.
-4. **What Vera said before, per merchant.** Fuller `conversation_history` would let the bot avoid repeating a topic across sessions.
+1. **Consent scope per trigger kind.** Most customers consent only to `promotional_offers`, leaving recalls a grey area.
+2. **Real appointment times and open slots.** Many `appointment_tomorrow` and `trial_followup` payloads are placeholders.
+3. **Review text and counts.** 5 of the 6 `review_theme_emerged` triggers carry no theme.
+4. **Average ticket size.** With it, the bot could quantify the revenue at stake, the judge's most frequent suggestion, without inventing numbers.
 
 ## Verify it yourself
 
 ```bash
 pip install -r requirements.txt && uvicorn bot:app --port 8080
-python tests/run_all.py            # boots its own bot, runs every test suite
-# manual: open http://127.0.0.1:8080/tester  ·  Postman: postman/Vera.postman_collection.json
+python tests/run_all.py            # boots its own bot and runs all 22 suites
+# manual: http://127.0.0.1:8080/tester  ·  Postman: postman/Vera.postman_collection.json
 ```
 
-The suites cover the §7 contract, the full judge lifecycle (48 checks), a seeded simulated-judge soak with 8 merchant personas, a structural fuzzer, restart and teardown, and intent accuracy. CI runs all of them on each push, on bare Python and against the Docker image. Details are in [`docs/DESIGN.md`](docs/DESIGN.md#tests).
+Judge re-test method and improvement log: [`docs/SCORE_IMPROVEMENTS.md`](docs/SCORE_IMPROVEMENTS.md).
