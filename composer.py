@@ -163,7 +163,9 @@ class Ctx:
         self.perf = _d(self.merchant.get("performance"))
         self.signals = [str(s) for s in _l(self.merchant.get("signals"))]
         self.peer = _d(self.category.get("peer_stats"))
-        self.hi = "hi" in self.m_langs
+        # Hinglish only when Hindi is the merchant's primary language; an English body with a Hindi tail reads as
+        # a literal translation, and almost every merchant lists 'hi' somewhere.
+        self.hi = bool(self.m_langs) and self.m_langs[0] == "hi"
         self.used_item: Optional[str] = None
 
     # ---- merchant-facing helpers -------------------------------------------
@@ -279,13 +281,17 @@ class Ctx:
     def peer_line(self) -> str:
         return self.peer_ctr_line() or self.peer_views_line()
 
-    def ask(self, noun: str) -> str:
-        """Single binary CTA, always the last sentence."""
+    def ask(self, noun: str, why: str = "") -> str:
+        """Single binary CTA, always the last sentence. `why` names the payoff, built only from context numbers."""
         noun = noun.strip()
+        why = f" {why.strip()}" if why and why.strip() else ""
+        # Drafts get a no-risk reassurance; links and lists don't need one.
+        safe = " — nothing goes live without your OK" if re.search(
+            r"post|draft|whatsapp|message|template|flyer|description|plan", noun, re.I) else ""
         if self.hi:
             noun = re.sub(r"^(the|a|an)\s+", "", noun).replace("+ a ", "+ ")
-            return f"Main {noun} bhej doon? Reply YES."
-        return f"Want me to send {noun}? Reply YES."
+            return f"Main {noun}{why} bhej doon? Reply YES{safe}."
+        return f"Want me to send {noun}{why}? Reply YES{safe}."
 
     # ---- customer-facing helpers -------------------------------------------
     def c_ident(self) -> dict:
@@ -361,14 +367,19 @@ def m_research(c: Ctx) -> dict:
         return m_generic(c)
     title, source = item.get("title", ""), item.get("source", "")
     trial = fmt_int(item.get("trial_n"))
-    trial_s = f"{trial}-{c.audience()} trial:" if trial else ""
+    summary = first_sentence(item.get("summary"))
+    trial_s = ""
+    if trial and re.search(r"\btrial\b", summary):  # fold the size into the summary's own "trial" instead of repeating it
+        summary = re.sub(r"\btrial\b", f"trial ({trial} {c.audience()}s)", summary, count=1)
+    elif trial:
+        trial_s = f"{trial}-{c.audience()} trial:"
     tie = ""
     if item.get("patient_segment") == "high_risk_adults" and "high_risk_adult_cohort" in c.signals:
         tie = "Directly relevant to your high-risk adult cohort."
     elif item.get("patient_segment"):
         tie = f"Most relevant for {human(item.get('patient_segment'))}."
     head = f"{c.sal()}, new in {source}:" if source else f"{c.sal()}, new digest item:"
-    body = join(head, f"{title}.", trial_s, first_sentence(item.get("summary")), tie,
+    body = join(head, f"{title}.", trial_s, summary, tie,
                 c.ask(f"the 2-min abstract + a {c.audience()}-ed WhatsApp draft you can forward"))
     return _res(body, "binary",
                 f"Digest item {item.get('id')} ({source}) matched to merchant; cites source + numbers, reciprocity CTA.",
@@ -395,7 +406,8 @@ def m_compliance(c: Ctx) -> dict:
     src = f"({item.get('source')})" if item.get("source") else ""
     body = join(f"{c.sal()}, compliance heads-up {src}: {title}.", first_sentence(item.get("summary")), when,
                 first_sentence(item.get("actionable")),
-                c.ask("a 1-page audit checklist for your setup"))
+                c.ask("a 1-page audit checklist for your setup",
+                      f"so you're covered well before {fmt_date(deadline)}" if deadline else ""))
     return _res(body, "binary", f"Regulatory item {item.get('id')} with deadline; loss-aversion + effort externalization.",
                 params=[c.sal(), title])
 
@@ -439,7 +451,13 @@ def m_perf_dip(c: Ctx) -> dict:
     offers = c.active_offers()
     lever = f"Re-pushing '{offers[0]}' in a fresh post is the fastest lever." if offers else (
         f"You have no active offer — '{c.catalog_offer()}' is the most common one in your category." if c.catalog_offer() else "")
-    body = join(head, c.perf_line(), c.peer_line(), stale_s, lever, c.ask("2 ready-to-publish Google posts"))
+    why = ""
+    base_n = _num(c.payload.get("vs_baseline"))
+    if p and base_n and metric == "calls" and round(base_n * p / 100) >= 1:
+        why = f"to win back the ~{round(base_n * p / 100)} calls/week you've lost"
+    elif p:
+        why = f"to win back the {p}% you've lost"
+    body = join(head, c.perf_line(), c.peer_line(), stale_s, lever, c.ask("2 ready-to-publish Google posts", why))
     return _res(body, "binary", f"Performance dip on {metric} ({p}%) anchored on merchant numbers + peer benchmark.",
                 params=[c.sal(), f"{p}%"])
 
@@ -460,7 +478,8 @@ def m_seasonal_dip(c: Ctx) -> dict:
     head = f"{c.sal()}, {human(metric)} are down {p}% this week — no panic." if p else f"{c.sal()}, {human(metric)} are dipping this week — no panic."
     action = f"Better ROI now: keep your {members} existing {c.audience()}s engaged instead of spending on ads." if members \
         else ("" if "retention" in beat.lower() else "Better ROI now: focus on retention instead of ad spend.")
-    body = join(head, beat, c.perf_line(), action, c.ask(f"a 3-message retention plan for current {c.audience()}s"))
+    body = join(head, beat, c.perf_line(), action, c.ask(f"a 3-message retention plan for current {c.audience()}s",
+                                                         "to keep them coming through the slow months"))
     return _res(body, "binary", "Seasonal dip reframed with category seasonal beat; retention over acquisition.",
                 params=[c.sal(), f"{p}%"])
 
@@ -472,9 +491,11 @@ def m_perf_spike(c: Ctx) -> dict:
     head = f"{c.sal()}, your {human(metric)} are up {p}% this week" if p else f"{c.sal()}, your {human(metric)} are climbing this week"
     head += f" — looks driven by your {driver}." if driver else "."
     offers = c.active_offers()
-    lever = f"A follow-up post pinning '{offers[0]}' converts the extra traffic while it lasts." if offers else \
-        "A follow-up post now converts the extra traffic while it lasts."
-    body = join(head, c.perf_line(), c.peer_views_line(), lever, c.ask("a follow-up post draft"))
+    tail = "" if p else " while it lasts"  # the ask carries "while the +N% lasts" when we have N
+    lever = f"A follow-up post pinning '{offers[0]}' converts the extra traffic{tail}." if offers else \
+        f"A follow-up post now converts the extra traffic{tail}."
+    body = join(head, c.perf_line(), c.peer_views_line(), lever,
+                c.ask("a follow-up post draft", f"while the +{p}% lasts" if p else ""))
     return _res(body, "binary", f"Performance spike ({p}%) — momentum + effort externalization.", params=[c.sal(), f"{p}%"])
 
 
@@ -497,7 +518,13 @@ def m_renewal(c: Ctx) -> dict:
     roi = c.perf_line()
     if roi and d:
         roi = roi[:-1] + f", {d} direction requests."
-    body = join(head, roi and f"What it delivered — {roi[0].lower() + roi[1:]}", c.ask("the renewal link"))
+    gap = c.peer_ctr_line()
+    if gap:  # weak numbers make a poor "what it delivered" pitch: lead with reach, own the gap, offer the fix
+        roi = roi and f"Your listing is getting seen — {roi[0].lower() + roi[1:]}"
+        gap = f"{gap} Renew, and I'll start on closing that gap with fresh posts and an offer."
+    else:
+        roi = roi and f"What it delivered — {roi[0].lower() + roi[1:]}"
+    body = join(head, roi, gap, c.ask("the renewal link", "so nothing pauses mid-month" if dn and dn > 0 else ""))
     return _res(body, "binary", "Renewal nudge anchored on the merchant's own 30-day results.", params=[c.sal(), str(days)])
 
 
@@ -520,7 +547,8 @@ def m_festival(c: Ctx) -> dict:
         head = f"{c.sal()}, festive season is coming up for {c.m_name}{c.where()}."
     offers = c.active_offers()
     noun = f"a festive post + WhatsApp draft built on '{offers[0]}'" if offers else "a festive offer + post draft"
-    body = join(head, beat, "Merchants who lock a festive offer early catch the early searches.", c.ask(noun))
+    body = join(head, beat, "Merchants who lock a festive offer early catch the early searches.",
+                c.ask(noun, f"so it's live before the {fest} searches start" if fest else ""))
     return _res(body, "binary", "Festival timing from trigger + category seasonal beat.", params=[c.sal(), fest or "festival"])
 
 
@@ -544,9 +572,13 @@ def m_winback(c: Ctx) -> dict:
         bits.append(f"views are down {dip}% since")
     head = f"{c.sal()}, " + (", and ".join(bits) + "." if bits else f"quick check-in on {c.m_name}.")
     lapsed_s = f"{lapsed} customers have lapsed in that window — they're the cheapest to win back." if lapsed else ""
+    older = fmt_int(_d(c.merchant.get("customer_aggregate")).get("lapsed_90d_plus"))
+    if lapsed_s and older and older != lapsed:  # scale of the problem, from the merchant's own aggregate
+        lapsed_s += f" In all, {older} customers have now been away 90+ days, and that list only grows."
     offers = c.active_offers()
     offer_s = f"'{offers[0]}' is still live to use as the hook." if offers else ""
-    body = join(head, lapsed_s, offer_s, c.ask("a 3-line win-back WhatsApp for them"))
+    body = join(head, lapsed_s, offer_s, c.ask("a 3-line win-back WhatsApp",
+                                               f"ready to go to all {lapsed}" if lapsed else "for them"))
     return _res(body, "binary", "Win-back with lapsed-customer count and expiry window from trigger.", params=[c.sal(), lapsed or ""])
 
 
@@ -579,7 +611,8 @@ def m_ipl(c: Ctx) -> dict:
             play = f"Tonight, push '{o}' for delivery/takeaway rather than a dine-in promo."
         else:
             play = f"Good night for a match-night dine-in push around '{o}'."
-    body = join(head, insight, play, c.ask("the match-night post + WhatsApp story"))
+    body = join(head, insight, play, c.ask("the match-night post + WhatsApp story",
+                                           f"ready well before the {when} start" if when else ""))
     return _res(body, "binary", "IPL match from trigger + category IPL insight; offer-specific play.", params=[c.sal(), match or "IPL"])
 
 
@@ -613,7 +646,8 @@ def m_review_theme(c: Ctx) -> dict:
         f"{c.sal()}, a review theme is emerging: {human(theme)}{trend}."
     q = f"One says: \"{quote}\"." if quote else ""
     body = join(head, q, "Replying publicly within 48h limits the rating damage.",
-                c.ask("reply templates for those reviews + a 1-line fix note for your team"))
+                c.ask("reply templates for those reviews + a 1-line fix note for your team",
+                      f"so all {n} get a reply inside 48h" if n else ""))
     return _res(body, "binary", "Review theme from trigger with verbatim quote; loss aversion on rating.", params=[c.sal(), human(theme)])
 
 
@@ -628,7 +662,8 @@ def m_milestone(c: Ctx) -> dict:
     else:
         head = f"{c.sal()}, {c.m_name or 'your listing'} just hit a {metric} milestone!"
     body = join(head, c.perf_line() if goal is None else "", "A short thank-you post asking happy customers to share feedback usually closes the gap in days.",
-                c.ask("the thank-you post + a WhatsApp nudge for regulars"))
+                c.ask("the thank-you post + a WhatsApp nudge for regulars",
+                      f"to get you past {int(goal)}" if (goal is not None and now_v is not None and goal > now_v) else ""))
     return _res(body, "binary", "Milestone progress from trigger; social proof + small ask.", params=[c.sal(), metric])
 
 
@@ -642,21 +677,42 @@ def m_planning(c: Ctx) -> dict:
         if price_in(o):
             base = (o, price_in(o))
             break
+    t = topic.lower()
+    agg = _d(c.merchant.get("customer_aggregate"))
+    # Every line is either copied from context or marked "suggested": a draft to edit, never a claimed fact.
     if base and c.cat == "restaurants":
         o, p = base
         lines = [f"- 10+ orders: suggested ₹{round(p * 0.95)} each (5% off your '{o}')",
                  f"- 25+ orders: suggested ₹{round(p * 0.90)} each (10% off)",
                  f"- 50+ orders: suggested ₹{round(p * 0.85)} each (15% off) + free delivery"]
+    elif c.cat == "restaurants":
+        who = "offices nearby ordering 10+ meals at a time" if ("corporate" in t or "bulk" in t) else \
+            "regulars and groups of 10+"
+        lines = [f"- Who: {who}",
+                 "- Format (suggested): weekday lunch, pre-order by 11am, delivered by 1pm",
+                 "- Price: per-plate tiers for 10+ / 25+ / 50+ orders — share your per-plate price and I'll fill them in"]
     else:
-        lines = ["- Who: age band / segment it's for",
-                 "- Format: sessions per week, batch size, duration",
-                 f"- Intro offer: anchored on your '{base[0]}'" if base else "- Intro offer: a first-week trial"]
+        who = "kids — pick one band, e.g. 5–8 or 9–12, so the batch moves together" if re.search(r"kid|child", t) else \
+            "one clear segment (e.g. beginners or working professionals)"
+        fmt = "4-week batch, 2 sessions/week, 45 min, max 10 per batch" if re.search(r"summer|camp|kid|child", t) else \
+            "2–3 sessions/week, 45–60 min, small batches"
+        lines = [f"- Who: {who}", f"- Format (suggested): {fmt}",
+                 f"- Intro offer: anchored on your '{base[0]}'" if base else "- Intro offer: a free first class"]
+    if c.cat == "restaurants" and fmt_int(agg.get("delivery_orders_30d")):
+        lines.append(f"- You already handle {fmt_int(agg.get('delivery_orders_30d'))} delivery orders a month, "
+                     "so fulfilment is covered.")
+    conv = pct(agg.get("trial_to_paid_pct"))
+    if conv:
+        lines.append(f"- Your trial-to-paid rate is {conv}%, so a free taster class before the paid month "
+                     "tends to pay for itself." if base else
+                     f"- Your trial-to-paid rate is {conv}%, so a free first class tends to pay for itself.")
     ack = f"you asked: \"{said}\" — here's a starter draft for {topic} (edit anything):" if said else \
         f"here's a starter draft for {topic} (edit anything):"
     name = c.owner or c.m_name
     body = f"{name + ', ' if name else ''}{ack}\n" + "\n".join(lines) + "\n" + (
-        "Isko Google post + WhatsApp flyer bana doon? Reply YES." if c.hi else
-        "Want me to turn it into a Google post + WhatsApp flyer? Reply YES.")
+        "Isko Google post + WhatsApp flyer bana doon? Reply YES — bina aapke OK ke kuch live nahi hoga." if c.hi else
+        "Want me to turn it into a Google post + WhatsApp flyer you can share today? "
+        "Reply YES — nothing goes live without your OK.")
     return {"body": body.strip(), "cta": "binary", "send_as": "vera",
             "rationale": "Merchant already expressed intent — delivered a draft artifact built on their real offer.",
             "template_params": [name, topic]}
@@ -671,26 +727,36 @@ def m_competitor(c: Ctx) -> dict:
     head += f" on {fmt_date(opened)}." if opened else "."
     theirs = f"They're advertising '{their}'." if their else ""
     offers = c.active_offers()
-    mine = ""
+    mine, why = "", "so searchers see you first"
     if offers:
         mine = f"Your '{offers[0]}' is live — worth a fresh post so searchers see it first."
+        mp, tp = price_in(offers[0]), price_in(their or "")
+        same = their and re.sub(r"@.*", "", their).strip().lower() == re.sub(r"@.*", "", offers[0]).strip().lower()
+        if same and mp and tp and mp > tp:  # same service, computed gap: name it instead of hiding from it
+            mine = f"That's ₹{mp - tp} under your '{offers[0]}' for the same service."
+            why = f"that shows searchers what the extra ₹{mp - tp} gets them"
     elif c.catalog_offer():
         mine = f"You have no live offer to answer with — '{c.catalog_offer()}' is the usual category hook."
     stale = c.stale_posts_days()
-    stale_s = f"Your last post is {stale} days old." if stale else ""
+    stale_s = f"Your last post is {stale} days old, so right now their launch is the fresher listing." if stale else ""
     body = join(head, theirs, mine, stale_s, "" if (their or stale) else c.perf_line(),
-                c.ask("a post highlighting your offer + reviews"))
+                c.ask("a post highlighting your offer + reviews", why))
     return _res(body, "binary", "Competitor facts only from trigger payload; loss aversion.", params=[c.sal(), who])
 
 
 def m_dormant(c: Ctx) -> dict:
     days = fmt_int(c.payload.get("days_since_last_merchant_message"))
     topic = human(c.payload.get("last_topic"))
-    head = f"{c.sal()}, it's been {days} days since we last spoke" + (f" (about {topic})." if topic else ".") if days \
+    head = (f"{c.sal()}, it's been {days} days since we last spoke" + (f" about your {topic}." if topic else ".")) if days \
         else f"{c.sal()}, quick check-in."
     item = c.digest(None, ("trend", "research", "seasonal", "tech"))
-    hook = f"One thing worth your time: {item.get('title')} ({item.get('source')})." if item and item.get("source") else ""
-    body = join(head, hook or c.perf_line(), c.ask("a 2-line summary of what it means for you"))
+    hook = ""
+    if item and item.get("source"):
+        src = re.sub(r"\bmagicpin internal\b", "magicpin data", str(item.get("source")))
+        hook = f"One quick win worth your time: {item.get('title')} — per {src}."
+    body = join(head, hook or c.perf_line(),
+                c.ask(f"a 2-line plan for applying it to {c.m_name}" if (hook and c.m_name) else
+                      "a 2-line summary of what it means for you"))
     return _res(body, "binary", "Re-engagement with a fresh, sourced hook instead of a generic ping.", params=[c.sal(), days or ""])
 
 
@@ -713,7 +779,8 @@ def m_supply(c: Ctx) -> dict:
             promised = "As you asked earlier, I can pull the list."
             break
     body = join(head, reason, rx_s, promised,
-                c.ask(f"the filtered list of {mol or 'affected'} customers + a replacement message"))
+                c.ask(f"the filtered list of {mol or 'affected'} customers + a replacement message",
+                      "so you can call them today"))
     return _res(body, "binary", "Recall alert with batch numbers from trigger; merchant's own Rx base.", params=[c.sal(), mol or ""])
 
 
@@ -736,7 +803,8 @@ def m_gbp(c: Ctx) -> dict:
     head = f"{c.sal()}, {c.m_name or 'your listing'} is still unverified on Google."
     upl = f"Verified listings see about {up}% more views and calls." if up else ""
     how = f"Verification is via {path}." if path else ""
-    body = join(head, upl, how, c.perf_line(), c.peer_views_line(), c.ask("step-by-step verification help"))
+    body = join(head, upl, how, c.perf_line(), c.peer_views_line(),
+                c.ask("step-by-step verification help", f"so that ~{up}% lift starts sooner" if up else ""))
     return _res(body, "binary", "Unverified GBP with uplift estimate from trigger.", params=[c.sal(), f"{up}%"])
 
 
@@ -804,7 +872,10 @@ def c_lapsed(c: Ctx) -> dict:
     else:
         s1 = (f"It's been {since} since your last visit" + (" — happens to everyone, no judgment." if gym else ".")) if since else c.last_visit_line()
         s2 = f"We'd love to help you get back to your {focus} goal." if focus else ""
-        s3 = f"This week for you: {offers[0]}." if offers else ""
+        s3 = (f"This week for you: {offers[0]}" + (f" — an easy way back into your {focus} routine." if focus else ".")) \
+            if offers else ""
+        if s3 and focus:
+            s2 = ""  # the offer line already carries the goal
         cta = "Reply YES and we'll hold a slot for you."
     body = join(f"{c.c_greet()}, {c.from_line()}", s1, s2, s3, cta)
     return _cust(body, "binary", "Lapsed customer win-back with real gap + merchant offer; no-shame framing.", c)
@@ -845,7 +916,12 @@ def c_trial(c: Ctx) -> dict:
         s2 = f"Next session: {' or '.join(slots)}." if slots else ""
         s3 = f"If you continue: {offers[0]}." if offers else ""
         cta = _two_slot_cta(slots) or ("Reply YES to book it." if slots else "Reply YES and we'll set up the next one.")
-    body = join(f"{c.c_greet()}, {c.from_line()}", s1, s2, s3, cta)
+    conv = pct(_d(c.merchant.get("customer_aggregate")).get("trial_to_paid_pct"))
+    proof = ""
+    if conv and conv >= 30:  # social proof only when the merchant's own number is a flattering one
+        proof = (f"Trial ke baad {conv}% log hamare saath continue karte hain." if c.c_hi() else
+                 f"{conv}% of people who try a session with us stay on.")
+    body = join(f"{c.c_greet()}, {c.from_line()}", s1, s2, proof, s3, cta)
     return _cust(body, "binary", "Trial follow-up with the real next-session slot.", c)
 
 
