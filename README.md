@@ -19,7 +19,7 @@ It never returns a 500, and every trigger is processed in isolation.
 
 ## Tradeoffs
 
-- **Templates instead of an LLM at runtime.** Messages are fast (median about 1 ms), deterministic, and can't invent facts, at the cost of less varied wording. The official `judge_simulator.py`, scoring with a local LLM, gave every one of the 19 messages it scored between 41 and 45 out of 50 (average 80%).
+- **Templates instead of an LLM at runtime.** Messages are fast (median about 1 ms), deterministic, and can't invent facts, at the cost of less varied wording. The official `judge_simulator.py`, scoring with a local LLM, gave every one of the 19 messages it scored between 41 and 45 out of 50, averaging 43.2 (86%), with no fabrication penalties. Its own summary line prints 40/50 because it rounds each dimension down before adding.
 - **Rules instead of a model for replies.** Easy to explain and to test. The classifier scores 100% on its 166-message training set, but **90% on a blind held-out set**, with 0 safety-critical misses. Unclear negatives default to a no-pressure reply, never a pitch.
 - **Conservative by default.** A STOP from a merchant also pauses messages sent to their customers on their behalf. Customers who explicitly opted out are skipped.
 - **Memory-only state.** This follows the brief ("must not persist context after the test"). Restart resilience is available as an opt-in (`VERA_STATE_FILE`), and `/v1/teardown` wipes it.

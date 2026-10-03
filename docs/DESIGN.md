@@ -98,7 +98,7 @@ uvicorn bot:app --port 8080
 | `held_out_intents.py`, `held_out_intents_2.py` | Held-out reply sets. #1 was used in design review; #2 is **blind** (90.2% accuracy, 0 safety-critical misses). Only safety-critical misses fail the build |
 | `test_bot.py` | Smoke test of the replay scenarios |
 
-**Official judge.** [`judge_simulator.py`](../judge_simulator.py) is byte-identical to the challenge copy. With a local LLM (`LLM_PROVIDER="ollama"`, `gemma3`) it gave each of 19 messages 41–45/50 (average 80%), and passed all 4 of its `all` scenarios. On Windows, run it with `PYTHONUTF8=1`.
+**Official judge.** [`judge_simulator.py`](../judge_simulator.py) is byte-identical to the challenge copy. With a local LLM (`LLM_PROVIDER="ollama"`, `gemma3`) its `full_evaluation` scenario gave each of 19 messages 41–45/50, averaging 43.2 (86%) with 0 penalties, and the bot passed all 4 of its `all` scenarios. Its summary prints 40/50 because it rounds each dimension down before adding; `all` scores no messages. On Windows, run it with `PYTHONUTF8=1`, because its dataset loader otherwise garbles `₹` and `—`. Details: [`SCORE_IMPROVEMENTS.md`](SCORE_IMPROVEMENTS.md).
 
 ## Manual testing
 
